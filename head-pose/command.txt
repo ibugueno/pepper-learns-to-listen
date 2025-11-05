@@ -1,0 +1,10 @@
+python train_biwi_vit.py \
+  --train-manifest /path/train.csv \
+  --val-manifest /path/val.csv \
+  --img-size 224 \
+  --model vit_base_patch16_224 \
+  --pretrained \
+  --batch-size 64 \
+  --epochs 50 \
+  --lr 3e-4 \
+  --out-dir ./runs/biwi_vit

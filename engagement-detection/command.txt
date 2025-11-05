@@ -1,0 +1,11 @@
+python train_engagement_dipser_noaudio.py \
+  --train-manifest /media/ignacio/KINGSTON/dipser/manifests/train.csv \
+  --val-manifest   /media/ignacio/KINGSTON/dipser/manifests/val.csv \
+  --img-size 160 \
+  --num-frames 32 \
+  --batch-size 16 \
+  --n-classes 3 \
+  --temporal gru --temporal-hidden 256 --temporal-layers 1 \
+  --epochs 30 --lr 3e-4 \
+  --out-dir ./runs/dipser_noaudio_gru \
+  --amp

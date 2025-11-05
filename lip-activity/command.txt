@@ -1,0 +1,12 @@
+python train_ava_activespeaker.py \
+  --train-manifest /media/ignacio/KINGSTON/ava/manifests/train.csv \
+  --val-manifest   /media/ignacio/KINGSTON/ava/manifests/val.csv \
+  --img-size 160 \
+  --num-frames 32 --fps 25 \
+  --batch-size 16 --num-workers 8 \
+  --epochs 30 --lr 3e-4 --opt adamw --weight-decay 1e-4 \
+  --temporal gru --temporal-hidden 256 \
+  --sample-rate 16000 --n-mels 64 --mel-fmin 50 --mel-fmax 0 \
+  --audio-gain-jitter 3.0 \
+  --out-dir ./runs/ava_spk_gru \
+  --amp
