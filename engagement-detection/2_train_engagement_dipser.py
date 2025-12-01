@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# train_engagement_dipser_noaudio.py
-# Engagement detection over DIPSER using ResNet18 + GRU/TCN.
+# train_engagement_dipser_vit.py
+# Engagement detection over DIPSER using visual-only ViT/ResNet + GRU/TCN.
 
 import os
 import csv
@@ -33,12 +33,6 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 
-def save_json(path: str, obj: dict):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(obj, f, indent=2)
-
-
 def count_params(model: nn.Module):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -51,11 +45,12 @@ class DIPSERDataset(Dataset):
     Manifest CSV columns:
         clip_id,frames_dir,labels_path
 
-    - frames_dir: folder with ordered face crops 000001.jpg, ...
-    - labels_path: .npy array of shape [N] with values in {0,1,2}
+    - frames_dir: folder with ordered face crops *.png/*.jpg
+    - labels_path: .npy array of shape [N] with values in {0,...,n_classes-1}
     """
 
-    def __init__(self, manifest_path, num_frames, img_size, train, n_classes, fps=25.0, augment=True):
+    def __init__(self, manifest_path, num_frames, img_size, train, n_classes,
+                 fps=25.0, augment=True):
         self.entries = self._read_manifest(manifest_path)
         self.num_frames = num_frames
         self.train = train
@@ -69,7 +64,8 @@ class DIPSERDataset(Dataset):
                 T.Resize((img_size, img_size)),
                 T.ColorJitter(0.2, 0.2, 0.2, 0.05),
                 T.RandomHorizontalFlip(p=0.5),
-                T.RandomAffine(degrees=10, translate=(0.05, 0.05), scale=(0.95, 1.05)),
+                T.RandomAffine(degrees=10, translate=(0.05, 0.05),
+                               scale=(0.95, 1.05)),
                 T.ToTensor(),
                 normalize,
             ])
@@ -90,10 +86,12 @@ class DIPSERDataset(Dataset):
                     frames = sorted(glob.glob(os.path.join(row["frames_dir"], "*.png")))
                 if len(frames) == 0:
                     continue
-                labels = row["labels_path"]
-                if not os.path.isfile(labels):
+                labels_path = row["labels_path"]
+                if not os.path.isfile(labels_path):
                     continue
-                out.append({"clip_id": row["clip_id"], "frames": frames, "labels": labels})
+                out.append({"clip_id": row["clip_id"],
+                            "frames": frames,
+                            "labels": labels_path})
         return out
 
     def __len__(self):
@@ -124,22 +122,35 @@ class DIPSERDataset(Dataset):
 
 
 # ----------------------------------------------------
-# Model (ResNet18 + GRU/TCN)
+# Model (ViT/ResNet + GRU/TCN)
 # ----------------------------------------------------
 class VisualBackbone(nn.Module):
-    def __init__(self, out_dim=256):
+    def __init__(self, out_dim=256, backbone="resnet18"):
         super().__init__()
-        m = tvm.resnet18(weights=tvm.ResNet18_Weights.DEFAULT)
-        feat_dim = m.fc.in_features
-        m.fc = nn.Identity()
-        self.backbone = m
-        self.proj = nn.Linear(feat_dim, out_dim)
+        self.backbone_name = backbone
+
+        if backbone == "resnet18":
+            m = tvm.resnet18(weights=tvm.ResNet18_Weights.DEFAULT)
+            feat_dim = m.fc.in_features
+            m.fc = nn.Identity()
+            self.backbone = m
+            self.proj = nn.Linear(feat_dim, out_dim)
+
+        elif backbone == "vit_b16":
+            m = tvm.vit_b_16(weights=tvm.ViT_B_16_Weights.DEFAULT)
+            # cabeza de clasificación -> identidad
+            feat_dim = m.heads.head.in_features
+            m.heads.head = nn.Identity()
+            self.backbone = m
+            self.proj = nn.Linear(feat_dim, out_dim)
+        else:
+            raise ValueError(f"Backbone no soportado: {backbone}")
 
     def forward(self, x_btchw):
         B, T = x_btchw.shape[:2]
         x = x_btchw.reshape(B * T, *x_btchw.shape[2:])
-        f = self.backbone(x)
-        f = self.proj(f)
+        f = self.backbone(x)   # [B*T, feat_dim]
+        f = self.proj(f)       # [B*T, out_dim]
         return f.view(B, T, -1)
 
 
@@ -186,9 +197,10 @@ class TemporalHeadTCN(nn.Module):
 
 
 class EngageModel(nn.Module):
-    def __init__(self, embed_dim, temporal, hidden, layers, n_classes):
+    def __init__(self, embed_dim, temporal, hidden, layers, n_classes,
+                 backbone="resnet18"):
         super().__init__()
-        self.visual = VisualBackbone(out_dim=embed_dim)
+        self.visual = VisualBackbone(out_dim=embed_dim, backbone=backbone)
         if temporal == "gru":
             self.temporal = TemporalHeadGRU(embed_dim, hidden, layers, n_classes)
         else:
@@ -203,6 +215,7 @@ class EngageModel(nn.Module):
 # Training
 # ----------------------------------------------------
 def loss_fn(logits, labels):
+    # logits: [B, T, C], labels: [B, T]
     B, T, C = logits.shape
     return nn.functional.cross_entropy(
         logits.reshape(B*T, C), labels.reshape(B*T)
@@ -239,29 +252,47 @@ def main():
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--n-classes", type=int, default=3)
 
-    p.add_argument("--temporal", choices=["gru","tcn"], default="gru")
+    p.add_argument("--backbone", type=str,
+                   choices=["resnet18", "vit_b16"],
+                   default="vit_b16")
+    p.add_argument("--temporal", choices=["gru", "tcn"], default="gru")
     p.add_argument("--temporal-hidden", type=int, default=256)
     p.add_argument("--temporal-layers", type=int, default=1)
     p.add_argument("--embed-dim", type=int, default=256)
 
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--opt", choices=["adamw","adam","sgd"], default="adamw")
+    p.add_argument("--opt", choices=["adamw", "adam", "sgd"], default="adamw")
 
-    p.add_argument("--out-dir", default="./runs/dipser_noaudio")
+    p.add_argument("--out-dir", default="./runs/dipser_engagement")
     p.add_argument("--amp", action="store_true")
     args = p.parse_args()
+
+    # Si usas ViT, lo normal es img_size=224
+    if args.backbone == "vit_b16" and args.img_size < 224:
+        print("[WARN] Con vit_b16 es recomendable --img-size 224. Ajustando...")
+        args.img_size = 224
 
     set_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    train_ds = DIPSERDataset(args.train_manifest, args.num_frames, args.img_size, True, args.n_classes)
-    val_ds   = DIPSERDataset(args.val-manifest, args.num_frames, args.img_size, False, args.n_classes)
+    train_ds = DIPSERDataset(args.train_manifest, args.num_frames, args.img_size,
+                             True, args.n_classes)
+    val_ds   = DIPSERDataset(args.val_manifest, args.num_frames, args.img_size,
+                             False, args.n_classes)
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
-    val_loader   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size,
+                              shuffle=True, num_workers=args.num_workers,
+                              drop_last=True)
+    val_loader   = DataLoader(val_ds, batch_size=args.batch_size,
+                              shuffle=False, num_workers=args.num_workers)
 
-    model = EngageModel(args.embed_dim, args.temporal, args.temporal-hidden, args.temporal-layers, args.n_classes).to(device)
+    model = EngageModel(args.embed_dim,
+                        args.temporal,
+                        args.temporal_hidden,
+                        args.temporal_layers,
+                        args.n_classes,
+                        backbone=args.backbone).to(device)
     print("Trainable params:", count_params(model))
 
     if args.opt == "adamw":
@@ -272,42 +303,79 @@ def main():
         optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
 
     scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
-    best_f1 = 0
+    best_f1 = 0.0
 
-    for epoch in range(1, args.epochs+1):
+    for epoch in range(1, args.epochs + 1):
+        t0 = time.time()
         model.train()
+        train_loss = 0.0
+        train_acc = 0.0
+        train_f1 = 0.0
+        n_train = 0
+
         for frames, labels, _ in train_loader:
-            frames, labels = frames.to(device), labels.to(device)
-            optimizer.zero_grad()
-            with torch.cuda.amp.autocast(enabled=args.amp):
+            frames = frames.to(device)  # [B, T, C, H, W]
+            labels = labels.to(device)  # [B, T]
+
+            optimizer.zero_grad(set_to_none=True)
+            if args.amp:
+                with torch.cuda.amp.autocast():
+                    logits = model(frames)
+                    loss = loss_fn(logits, labels)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
                 logits = model(frames)
                 loss = loss_fn(logits, labels)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+                loss.backward()
+                optimizer.step()
+
+            train_loss += loss.item() * frames.size(0)
+            acc, f1 = frame_metrics(logits.detach(), labels.detach(), args.n_classes)
+            train_acc += acc * frames.size(0)
+            train_f1 += f1 * frames.size(0)
+            n_train += frames.size(0)
+
+        train_loss /= n_train
+        train_acc  /= n_train
+        train_f1   /= n_train
 
         # Eval
         model.eval()
-        val_loss = 0; acc=0; f1=0; n=0
+        val_loss = 0.0
+        val_acc = 0.0
+        val_f1 = 0.0
+        n_val = 0
+
         with torch.no_grad():
             for frames, labels, _ in val_loader:
-                frames, labels = frames.to(device), labels.to(device)
+                frames = frames.to(device)
+                labels = labels.to(device)
                 logits = model(frames)
-                val_loss += loss_fn(logits, labels).item()*frames.size(0)
-                a, f = frame_metrics(logits, labels, args.n_classes)
-                acc += a*frames.size(0)
-                f1 += f*frames.size(0)
-                n += frames.size(0)
-        val_loss/=n; acc/=n; f1/=n
+                loss = loss_fn(logits, labels)
+                val_loss += loss.item() * frames.size(0)
+                acc, f1 = frame_metrics(logits, labels, args.n_classes)
+                val_acc += acc * frames.size(0)
+                val_f1  += f1 * frames.size(0)
+                n_val   += frames.size(0)
 
-        print(f"[{epoch}] val_loss={val_loss:.4f} acc={acc:.3f} macroF1={f1:.3f}")
+        val_loss /= n_val
+        val_acc  /= n_val
+        val_f1   /= n_val
 
-        if f1 > best_f1:
-            best_f1 = f1
+        dt = time.time() - t0
+        print(f"[{epoch:03d}/{args.epochs}] "
+              f"train: loss={train_loss:.4f} acc={train_acc:.3f} f1={train_f1:.3f} | "
+              f"val: loss={val_loss:.4f} acc={val_acc:.3f} f1={val_f1:.3f} | "
+              f"time={dt:.1f}s")
+
+        if val_f1 > best_f1:
+            best_f1 = val_f1
             os.makedirs(args.out_dir, exist_ok=True)
-            torch.save(model.state_dict(), f"{args.out_dir}/best.pt")
+            torch.save(model.state_dict(), os.path.join(args.out_dir, "best.pt"))
 
-    print("Done. Best macro-F1 =", best_f1)
+    print("Done. Best val macro-F1 =", best_f1)
 
 
 if __name__ == "__main__":
