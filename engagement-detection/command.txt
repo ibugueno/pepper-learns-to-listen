@@ -19,12 +19,12 @@ root@67aaa64b6a3e:/app/engagement-detection# python 1_precompute_dipser_bboxes.p
 #train
 
 root@67aaa64b6a3e:/app/engagement-detection# python 2_train_engagement_dipser.py \
-    --train-csv /app/input/dipser/engagement_single_v1/train.csv \
-    --val-csv   /app/input/dipser/engagement_single_v1/val.csv \
-    --gpu 0 \
-    --backbone vit_b16 \
-    --img-size 224 \
-    --batch-size 32 \
-    --epochs 30 \
-    --n-classes 2 \
-    --out-dir /app/output/dipser_single_vit
+  --train-csv /app/input/dipser/engagement_single_v1_bbox/train_bbox.csv \
+  --val-csv   /app/input/dipser/engagement_single_v1_bbox/val_bbox.csv \
+  --gpu 0 \
+  --backbone vit_b16 \
+  --img-size 224 \
+  --batch-size 32 \
+  --epochs 30 \
+  --n-classes 2 \
+  --out-dir /app/output/dipser_single_vit_faces_bin

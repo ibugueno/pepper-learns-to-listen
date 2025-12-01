@@ -37,9 +37,16 @@ def count_params(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-# ---------------- Dataset ----------------
 class DipserSingleFrameDataset(Dataset):
     def __init__(self, csv_path: str, img_size: int, train: bool, n_classes: int, augment: bool = True):
+        """
+        csv_path debe tener columnas:
+          image_path,label,clip_id,datetime,x1,y1,x2,y2
+
+        Aquí ya binarizamos:
+          attention 1–2 -> 0 (low engagement)
+          attention >=3 -> 1 (high engagement)
+        """
         self.samples = self._read_csv(csv_path)
         self.n_classes = n_classes
 
@@ -68,17 +75,38 @@ class DipserSingleFrameDataset(Dataset):
             for row in reader:
                 img = row["image_path"]
 
-                orig = int(row["label"])       
+                # comprobamos que existan las columnas de bbox
+                try:
+                    x1 = int(row["x1"])
+                    y1 = int(row["y1"])
+                    x2 = int(row["x2"])
+                    y2 = int(row["y2"])
+                except KeyError:
+                    raise ValueError(
+                        f"El CSV {path} debe tener columnas x1,y1,x2,y2. "
+                        f"Encontrado: {reader.fieldnames}"
+                    )
 
+                # etiqueta original (attention 1..5)
+                orig = int(row["label"])
+
+                # binarización: 1,2 -> 0 ; 3,4,5 -> 1
                 if orig in (1, 2):
                     lbl = 0                  # low engagement
                 else:
-                    lbl = 1                  # high engagement (3,4,5)
-
+                    lbl = 1                  # high engagement
 
                 if not os.path.isfile(img):
                     continue
-                out.append({"image_path": img, "label": lbl})
+
+                out.append({
+                    "image_path": img,
+                    "label": lbl,
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                })
         if not out:
             raise RuntimeError(f"No samples in {path}")
         return out
@@ -89,9 +117,15 @@ class DipserSingleFrameDataset(Dataset):
     def __getitem__(self, idx):
         s = self.samples[idx]
         img = Image.open(s["image_path"]).convert("RGB")
+
+        # crop al rostro
+        x1, y1, x2, y2 = s["x1"], s["y1"], s["x2"], s["y2"]
+        img = img.crop((x1, y1, x2, y2))
+
         x = self.tf(img)
         y = torch.tensor(s["label"], dtype=torch.long)
         return x, y
+
 
 
 # ---------------- Model ----------------
@@ -221,7 +255,7 @@ def parse_args():
     p.add_argument("--img-size", type=int, default=224)
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=4)
-    p.add_argument("--n-classes", type=int, default=3)
+    p.add_argument("--n-classes", type=int, default=2)
 
     p.add_argument("--backbone", type=str,
                    choices=["resnet18", "vit_b16"],
