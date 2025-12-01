@@ -67,7 +67,7 @@ class DipserSingleFrameDataset(Dataset):
             reader = csv.DictReader(f)
             for row in reader:
                 img = row["image_path"]
-                lbl = int(row["label"])
+                lbl = int(row["label"]) - 1
                 if not os.path.isfile(img):
                     continue
                 out.append({"image_path": img, "label": lbl})
