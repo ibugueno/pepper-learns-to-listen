@@ -512,6 +512,12 @@ def parse_args():
         description="ViT Head Pose Regression (BIWI RGB+Depth crops)"
     )
 
+    p.add_argument(
+        "--gpu", type=int, default=0,
+        help="GPU ID to use (0-7). Use -1 for CPU."
+    )
+
+
     # Data
     p.add_argument(
         "--train-manifest",
@@ -627,7 +633,11 @@ def main():
     args = parse_args()
     set_seed(args.seed)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # If --gpu = -1 → CPU
+    if args.gpu == -1 or not torch.cuda.is_available():
+        device = torch.device("cpu")
+    else:
+        device = torch.device(f"cuda:{args.gpu}")
 
     train_loader, val_loader = create_loaders(
         args.train_manifest,

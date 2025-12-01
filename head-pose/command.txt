@@ -25,9 +25,10 @@ python 1_build_biwi_crops_and_csv.py \
 # for training
 
 python 2_train_biwi_vit_rgbd.py \
-  --train-manifest /home/ignacio.bugueno/cachefs/cis/input/biwi-kinect-head/crops_yolo/train_yolo.csv \
-  --val-manifest   /home/ignacio.bugueno/cachefs/cis/input/biwi-kinect-head/crops_yolo/val_yolo.csv \
-  --data-root      /home/ignacio.bugueno/cachefs/cis/input/biwi-kinect-head \
+  --train-manifest /app/input/biwi-kinect-head/crops_yolo/train_yolo.csv \
+  --val-manifest   /app/input/biwi-kinect-head/crops_yolo/val_yolo.csv \
+  --data-root      /app/input/biwi-kinect-head \
+  --gpu 0 \
   --img-size 224 \
   --batch-size 64 \
   --num-workers 8 \
