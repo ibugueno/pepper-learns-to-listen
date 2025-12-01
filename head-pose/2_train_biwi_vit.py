@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# train_biwi_vit.py
+# 1_train_biwi_vit.py
 # ViT-based head pose regression (yaw, pitch, roll) for BIWI-like datasets using a CSV manifest.
 
 import os

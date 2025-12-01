@@ -1,3 +1,29 @@
+# for inspect
+
+python 0_inspect_biwi_dataset.py \
+    --faces_dir /media/ignacio/KINGSTON/biwi-kinect-head/archive/faces_0 \
+    --db_annotations /media/ignacio/KINGSTON/biwi-kinect-head/archive/db_annotations \
+    --subject 01 \
+    --frame 00003
+
+# for csv
+
+python 1_build_biwi_crops_and_csv.py \
+  --faces-dir /media/ignacio/KINGSTON/biwi-kinect-head/archive/faces_0 \
+  --masks-dir /media/ignacio/KINGSTON/biwi-kinect-head/archive/head_pose_masks \
+  --out-root  /media/ignacio/KINGSTON/biwi-kinect-head/crops_yolo \
+  --train-csv /media/ignacio/KINGSTON/biwi-kinect-head/crops_yolo/train_yolo.csv \
+  --val-csv   /media/ignacio/KINGSTON/biwi-kinect-head/crops_yolo/val_yolo.csv \
+  --val-split 0.2 \
+  --pad 15 \
+  --abs-paths \
+  --yolo-model yolov8n-face.pt \
+  --yolo-conf 0.4 \
+  --yolo-img-size 640
+
+
+# for training
+
 python train_biwi_vit.py \
   --train-manifest /path/train.csv \
   --val-manifest /path/val.csv \
