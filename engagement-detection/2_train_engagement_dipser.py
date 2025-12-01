@@ -203,6 +203,10 @@ def validate(model, loader, device, n_classes: int):
 # ---------------- Main ----------------
 def parse_args():
     p = argparse.ArgumentParser(description="DIPSER single-frame engagement classifier")
+
+    p.add_argument("--gpu", type=int, default=0,
+                   help="Índice de GPU a usar (por ejemplo 0, 1, 2...).")
+
     p.add_argument("--train-csv", type=str, required=True)
     p.add_argument("--val-csv", type=str, required=True)
 
@@ -229,7 +233,13 @@ def parse_args():
 def main():
     args = parse_args()
     set_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{args.gpu}")
+        print(f"[INFO] Usando GPU {args.gpu} → {device}")
+    else:
+        device = torch.device("cpu")
+        print("[WARN] No hay CUDA disponible, usando CPU.")
 
     # ViT necesita 224x224 típicamente
     if args.backbone == "vit_b16" and args.img_size < 224:

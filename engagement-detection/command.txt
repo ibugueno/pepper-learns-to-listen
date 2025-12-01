@@ -1,7 +1,7 @@
 #prepare
 
 
-root@67aaa64b6a3e:/app/engagement-detection# python prepare_dipser_engagement.py \
+root@67aaa64b6a3e:/app/engagement-detection# python 1_prepare_dipser_engagement.py \
     --dipser-root /app/input/dipser/DIPSER/V5/DIPSER \
     --out-root    /app/input/dipser/engagement_single_v1 \
     --labeler-json labeler_01.json \
@@ -11,11 +11,13 @@ root@67aaa64b6a3e:/app/engagement-detection# python prepare_dipser_engagement.py
 
 #train
 
-root@67aaa64b6a3e:/app/engagement-detection# python train_engagement_dipser_single.py \
+root@67aaa64b6a3e:/app/engagement-detection# python 2_train_engagement_dipser.py \
     --train-csv /app/input/dipser/engagement_single_v1/train.csv \
     --val-csv   /app/input/dipser/engagement_single_v1/val.csv \
+    --gpu 0 \
     --backbone vit_b16 \
     --img-size 224 \
     --batch-size 32 \
     --epochs 30 \
+    --n-classes 5 \
     --out-dir /app/output/dipser_single_vit
