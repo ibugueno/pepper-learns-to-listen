@@ -1,12 +1,19 @@
 #prepare
 
 
-root@67aaa64b6a3e:/app/engagement-detection# python 1_prepare_dipser_engagement.py \
+root@67aaa64b6a3e:/app/engagement-detection# python 0_prepare_dipser_engagement.py \
     --dipser-root /app/input/dipser/DIPSER/V5/DIPSER \
     --out-root    /app/input/dipser/engagement_single_v1 \
     --labeler-json labeler_01.json \
     --min-frames-per-subject 8 \
     --val-ratio 0.2
+
+# faces
+
+root@67aaa64b6a3e:/app/engagement-detection# python 1_precompute_dipser_bboxes.py \
+  --train-csv /app/input/dipser/engagement_single_v1/train.csv \
+  --val-csv   /app/input/dipser/engagement_single_v1/val.csv \
+  --out-dir   /app/input/dipser/engagement_single_v1_bbox
 
 
 #train
