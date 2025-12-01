@@ -1,0 +1,15 @@
+torch==2.2.0
+torchvision==0.17.0
+torchaudio==2.2.0
+numpy
+matplotlib
+seaborn
+scikit-learn
+tqdm
+Pillow
+PyYAML
+opencv-python
+timm
+huggingface_hub
+urllib3
+idna
