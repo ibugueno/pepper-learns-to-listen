@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# train_ava_activespeaker.py
-# Audio-Visual Active Speaker Detection with temporal modeling (Bi-GRU or TCN).
-# Manifest CSV columns: clip_id,frames_dir,audio_path,labels_path
+# train_ava_activespeaker_imgonly.py
+# Active Speaker Detection sólo con imagen (face crops) + modelo temporal (GRU/TCN).
+# Manifest CSV columnas: clip_id,frames_dir,labels_path
 
 import os
 import csv
@@ -24,12 +24,6 @@ from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as T
 from torchvision import models as tvm
 
-try:
-    import torchaudio
-    from torchaudio.transforms import MelSpectrogram, AmplitudeToDB
-except ImportError as e:
-    raise SystemExit("This script requires 'torchaudio'. Install via: pip install torchaudio")
-
 # ----------------------------
 # Utils
 # ----------------------------
@@ -51,18 +45,18 @@ def count_params(model: nn.Module) -> int:
 
 
 # ----------------------------
-# Dataset
+# Dataset (imagen sólo)
 # ----------------------------
-class AVAManifestDataset(Dataset):
+class AVAImgOnlyDataset(Dataset):
     """
-    Each row in the manifest:
-      clip_id,frames_dir,audio_path,labels_path
+    Cada fila en el manifest:
+      clip_id,frames_dir,labels_path
 
-    Assumptions:
-      - frames_dir contains sequential images for the clip (one face crop per frame).
-      - audio_path is a mono .wav
-      - labels_path is a .npy int array of length >= number_of_frames (0/1 per frame)
-    We train on fixed-length windows of size num_frames (T).
+    Suposiciones:
+      - frames_dir contiene las caras recortadas: una imagen por frame (jpg/png).
+      - labels_path es un .npy con vector 0/1 por frame (NOT_SPEAKING / SPEAKING),
+        alineado con los frames del directorio.
+    Entrenamos ventanas temporales de longitud num_frames (T).
     """
     def __init__(
         self,
@@ -71,24 +65,14 @@ class AVAManifestDataset(Dataset):
         img_size: int,
         train: bool,
         fps: float = 25.0,
-        sample_rate: int = 16000,
-        n_mels: int = 64,
-        mel_fmin: float = 50.0,
-        mel_fmax: Optional[float] = None,
         augment: bool = True,
-        audio_gain_jitter: float = 0.0,
     ):
         self.items = self._read_manifest(manifest_path)
         self.num_frames = num_frames
         self.train = train
         self.fps = fps
-        self.sample_rate = sample_rate
-        self.n_mels = n_mels
-        self.mel_fmin = mel_fmin
-        self.mel_fmax = mel_fmax
-        self.audio_gain_jitter = audio_gain_jitter
 
-        # Image transforms
+        # Transforms de imagen (sobre el crop, no sobre la imagen completa)
         normalize = T.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
         if train and augment:
             self.tf = T.Compose([
@@ -105,25 +89,13 @@ class AVAManifestDataset(Dataset):
                 normalize
             ])
 
-        # Audio transforms
-        self.melspec = MelSpectrogram(
-            sample_rate=sample_rate,
-            n_fft=1024,
-            hop_length=int(sample_rate / fps),  # ~one hop per video frame
-            win_length=1024,
-            n_mels=n_mels,
-            f_min=mel_fmin,
-            f_max=mel_fmax
-        )
-        self.a2db = AmplitudeToDB(stype="power")
-
     def _read_manifest(self, path: str) -> List[Dict]:
         if not os.path.isfile(path):
             raise FileNotFoundError(f"Manifest not found: {path}")
         out = []
         with open(path, "r", newline="") as f:
             reader = csv.DictReader(f)
-            req = {"clip_id", "frames_dir", "audio_path", "labels_path"}
+            req = {"clip_id", "frames_dir", "labels_path"}
             if not req.issubset(set(reader.fieldnames or [])):
                 raise ValueError(f"Manifest must contain columns: {req}, got {reader.fieldnames}")
             for row in reader:
@@ -132,14 +104,11 @@ class AVAManifestDataset(Dataset):
                     frames = sorted(glob.glob(os.path.join(row["frames_dir"], "*.png")))
                 if len(frames) == 0:
                     continue
-                if not os.path.isfile(row["audio_path"]):
-                    continue
                 if not os.path.isfile(row["labels_path"]):
                     continue
                 out.append({
                     "clip_id": row["clip_id"],
                     "frames": frames,
-                    "audio": row["audio_path"],
                     "labels_path": row["labels_path"]
                 })
         if len(out) == 0:
@@ -152,67 +121,35 @@ class AVAManifestDataset(Dataset):
     def _load_frames_window(self, frames: List[str], start: int, T: int) -> torch.Tensor:
         imgs = []
         for i in range(start, start + T):
-            i_clamped = min(i, len(frames)-1)
+            i_clamped = min(i, len(frames) - 1)
             img = Image.open(frames[i_clamped]).convert("RGB")
             imgs.append(self.tf(img))
         # [T, C, H, W]
         return torch.stack(imgs, dim=0)
-
-    def _load_audio_mel_window(self, audio_path: str, start: int, T: int) -> torch.Tensor:
-        wav, sr = torchaudio.load(audio_path)  # [1, N] mono expected
-        if wav.size(0) > 1:
-            wav = torch.mean(wav, dim=0, keepdim=True)  # to mono
-        if sr != self.sample_rate:
-            wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
-
-        # optional gain jitter
-        if self.train and self.audio_gain_jitter > 0:
-            gain = 10 ** (random.uniform(-self.audio_gain_jitter, self.audio_gain_jitter) / 20.0)
-            wav = wav * gain
-
-        # Mel spectrogram -> [n_mels, time_steps]
-        mel = self.melspec(wav)  # power mel
-        mel_db = self.a2db(mel)  # log-mel
-        # Align to frames: hop_length chosen ~ one step per frame
-        # Now select mel frames [start:start+T]
-        # Convert waveform frames to video-frame index via hop; but we crafted hop=sr/fps,
-        # so mel_db.shape[-1] ~= num_video_frames for the full clip (if perfectly aligned).
-        # We guard with clamping/padding.
-
-        total_mel_steps = mel_db.shape[-1]
-        # If total_mel_steps < total_video_frames, we will clamp/pad.
-        # For our window: take [start, start+T)
-        idx_end = start + T
-        mel_slice = mel_db[:, :, start:min(idx_end, total_mel_steps)]  # [1, n_mels, t']
-        if mel_slice.shape[-1] < T:
-            pad = T - mel_slice.shape[-1]
-            mel_slice = torch.nn.functional.pad(mel_slice, (0, pad), mode="replicate")
-        # [T, n_mels] after transpose
-        mel_per_frame = mel_slice.squeeze(0).transpose(0, 1)  # [t, n_mels]
-        return mel_per_frame  # [T, n_mels]
 
     def __getitem__(self, idx):
         item = self.items[idx]
         frames = item["frames"]
         labels = np.load(item["labels_path"]).astype(np.float32).reshape(-1)
 
-        # Choose a window
+        # Por seguridad, recorta/ajusta labels al nº de frames
+        n = min(len(frames), len(labels))
+        frames = frames[:n]
+        labels = labels[:n]
+
+        # Escoger ventana
         max_start = max(0, len(frames) - self.num_frames)
         if self.train:
             start = random.randint(0, max_start) if max_start > 0 else 0
         else:
-            start = max_start // 2  # center for val
+            start = max_start // 2  # centro para validación
 
-        # Visual window: [T, C, H, W]
+        # Ventana visual: [T, C, H, W]
         v = self._load_frames_window(frames, start, self.num_frames)
 
-        # Audio window aligned to frame indices: [T, n_mels]
-        a = self._load_audio_mel_window(item["audio"], start, self.num_frames)
-
-        # Labels window: [T]
-        labels_full = labels
+        # Ventana de labels: [T]
         end = start + self.num_frames
-        y = labels_full[start:min(end, len(labels_full))]
+        y = labels[start:min(end, len(labels))]
         if len(y) < self.num_frames:
             pad = self.num_frames - len(y)
             y = np.pad(y, (0, pad), mode="edge")
@@ -222,14 +159,14 @@ class AVAManifestDataset(Dataset):
             "clip_id": item["clip_id"],
             "start": start
         }
-        return v, a, y, meta
+        return v, y, meta
 
 
 # ----------------------------
-# Model
+# Modelo: VisualBackbone + Temporal (GRU/TCN)
 # ----------------------------
 class VisualBackbone(nn.Module):
-    """Lightweight per-frame CNN (ResNet18) returning embedding vectors."""
+    """CNN por frame (ResNet18) que devuelve un embedding."""
     def __init__(self, out_dim=256, pretrained=True):
         super().__init__()
         m = tvm.resnet18(weights=tvm.ResNet18_Weights.DEFAULT if pretrained else None)
@@ -245,27 +182,8 @@ class VisualBackbone(nn.Module):
         return f
 
 
-class AudioBackbone(nn.Module):
-    """Tiny 1D conv over per-frame mel vectors (treated as sequence)."""
-    def __init__(self, n_mels=64, out_dim=128):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv1d(n_mels, 128, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv1d(128, out_dim, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-        )
-
-    def forward(self, x):
-        # x: [B, T, n_mels] -> [B, n_mels, T]
-        x = x.transpose(1, 2)
-        y = self.net(x)               # [B, out_dim, T]
-        y = y.transpose(1, 2)         # [B, T, out_dim]
-        return y
-
-
 class TemporalHeadGRU(nn.Module):
-    """Bi-GRU temporal head + per-frame classifier."""
+    """Bi-GRU temporal + clasificador por frame."""
     def __init__(self, in_dim: int, hidden: int = 256, num_layers: int = 1, dropout: float = 0.1):
         super().__init__()
         self.gru = nn.GRU(
@@ -279,7 +197,7 @@ class TemporalHeadGRU(nn.Module):
         self.head = nn.Sequential(
             nn.Linear(hidden * 2, hidden),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden, 1)  # logits per frame
+            nn.Linear(hidden, 1)  # logits por frame
         )
 
     def forward(self, x):
@@ -290,7 +208,7 @@ class TemporalHeadGRU(nn.Module):
 
 
 class TemporalHeadTCN(nn.Module):
-    """Temporal Convolutional Network head (1D dilated conv) + per-frame classifier."""
+    """Temporal Convolutional Network (1D dilatada) + clasificador por frame."""
     def __init__(self, in_dim: int, hidden: int = 256, layers: int = 3, kernel_size: int = 3, dropout: float = 0.1):
         super().__init__()
         ch = [in_dim] + [hidden] * layers
@@ -319,46 +237,39 @@ class TemporalHeadTCN(nn.Module):
         return logits
 
 
-class AVASpkModel(nn.Module):
-    """Audio-Visual late fusion + temporal head (GRU or TCN)."""
-    def __init__(self, img_embed_dim=256, aud_embed_dim=128, temporal="gru", temporal_hidden=256):
+class AVASpkImgModel(nn.Module):
+    """Solo imagen: backbone visual + cabeza temporal."""
+    def __init__(self, img_embed_dim=256, temporal="gru", temporal_hidden=256):
         super().__init__()
         self.v_backbone = VisualBackbone(out_dim=img_embed_dim, pretrained=True)
-        self.a_backbone = AudioBackbone(out_dim=aud_embed_dim)
-        d_in = img_embed_dim + aud_embed_dim
         if temporal == "gru":
-            self.temporal = TemporalHeadGRU(in_dim=d_in, hidden=temporal_hidden)
+            self.temporal = TemporalHeadGRU(in_dim=img_embed_dim, hidden=temporal_hidden)
         elif temporal == "tcn":
-            self.temporal = TemporalHeadTCN(in_dim=d_in, hidden=temporal_hidden)
+            self.temporal = TemporalHeadTCN(in_dim=img_embed_dim, hidden=temporal_hidden)
         else:
             raise ValueError("temporal must be 'gru' or 'tcn'")
 
-    def forward(self, frames_btchw, audio_bt_mels):
+    def forward(self, frames_btchw):
         """
         frames_btchw: [B, T, C, H, W]
-        audio_bt_mels: [B, T, n_mels]
         """
         B, T = frames_btchw.shape[:2]
         x = frames_btchw.reshape(B*T, *frames_btchw.shape[2:])
-        v = self.v_backbone(x)                   # [B*T, Dv]
-        v = v.view(B, T, -1)                     # [B, T, Dv]
-        a = self.a_backbone(audio_bt_mels)       # [B, T, Da]
-        z = torch.cat([v, a], dim=-1)            # [B, T, D]
-        logits = self.temporal(z)                # [B, T]
+        v = self.v_backbone(x)                   # [B*T, D]
+        v = v.view(B, T, -1)                     # [B, T, D]
+        logits = self.temporal(v)                # [B, T]
         return logits
 
 
 # ----------------------------
-# Train / Eval
+# Train / Eval (igual que antes, sin audio)
 # ----------------------------
 def bce_logits_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    # logits: [B, T], targets: [B, T]
     return nn.functional.binary_cross_entropy_with_logits(logits, targets)
 
 
 @torch.no_grad()
 def frame_metrics(logits: torch.Tensor, targets: torch.Tensor, thr: float = 0.5):
-    # logits/targets: [B, T]
     probs = torch.sigmoid(logits)
     preds = (probs >= thr).float()
     t = targets.float()
@@ -381,15 +292,14 @@ def train_one_epoch(model, loader, optimizer, device, scaler=None, max_norm=1.0)
     m_acc = m_prec = m_rec = m_f1 = 0.0
     n_samples = 0
 
-    for frames, mels, labels, _ in loader:
+    for frames, labels, _ in loader:
         frames = frames.to(device)          # [B, T, C, H, W]
-        mels = mels.to(device)              # [B, T, n_mels]
         labels = labels.to(device)          # [B, T]
 
         optimizer.zero_grad(set_to_none=True)
         if scaler is not None:
             with torch.cuda.amp.autocast(True):
-                logits = model(frames, mels)
+                logits = model(frames)
                 loss = bce_logits_loss(logits, labels)
             scaler.scale(loss).backward()
             if max_norm and max_norm > 0:
@@ -398,7 +308,7 @@ def train_one_epoch(model, loader, optimizer, device, scaler=None, max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
         else:
-            logits = model(frames, mels)
+            logits = model(frames)
             loss = bce_logits_loss(logits, labels)
             loss.backward()
             if max_norm and max_norm > 0:
@@ -429,11 +339,10 @@ def validate(model, loader, device):
     m_acc = m_prec = m_rec = m_f1 = 0.0
     n_samples = 0
 
-    for frames, mels, labels, _ in loader:
+    for frames, labels, _ in loader:
         frames = frames.to(device)
-        mels = mels.to(device)
         labels = labels.to(device)
-        logits = model(frames, mels)
+        logits = model(frames)
         loss = bce_logits_loss(logits, labels)
 
         total_loss += loss.item() * frames.size(0)
@@ -454,31 +363,21 @@ def validate(model, loader, device):
 
 
 def create_loaders(args):
-    train_ds = AVAManifestDataset(
+    train_ds = AVAImgOnlyDataset(
         manifest_path=args.train_manifest,
         num_frames=args.num_frames,
         img_size=args.img_size,
         train=True,
         fps=args.fps,
-        sample_rate=args.sample_rate,
-        n_mels=args.n_mels,
-        mel_fmin=args.mel_fmin,
-        mel_fmax=args.mel_fmax,
         augment=not args.no_img_aug,
-        audio_gain_jitter=args.audio_gain_jitter
     )
-    val_ds = AVAManifestDataset(
+    val_ds = AVAImgOnlyDataset(
         manifest_path=args.val_manifest,
         num_frames=args.num_frames,
         img_size=args.img_size,
         train=False,
         fps=args.fps,
-        sample_rate=args.sample_rate,
-        n_mels=args.n_mels,
-        mel_fmin=args.mel_fmin,
-        mel_fmax=args.mel_fmax,
         augment=False,
-        audio_gain_jitter=0.0
     )
 
     train_loader = DataLoader(
@@ -520,7 +419,7 @@ def save_checkpoint(state: dict, out_dir: str, filename: str):
 # Argparse / Main
 # ----------------------------
 def parse_args():
-    p = argparse.ArgumentParser(description="Audio-Visual Active Speaker Detection (AVA-style)")
+    p = argparse.ArgumentParser(description="Image-only Active Speaker Detection (AVA-style)")
 
     # Data
     p.add_argument("--train-manifest", type=str, required=True)
@@ -532,16 +431,8 @@ def parse_args():
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--no-img-aug", action="store_true", help="Disable image augmentations")
 
-    # Audio
-    p.add_argument("--sample-rate", type=int, default=16000)
-    p.add_argument("--n-mels", type=int, default=64)
-    p.add_argument("--mel-fmin", type=float, default=50.0)
-    p.add_argument("--mel-fmax", type=float, default=0.0, help="0 -> None")
-    p.add_argument("--audio-gain-jitter", type=float, default=0.0, help="±dB gain jitter for audio augmentation")
-
     # Model
     p.add_argument("--img-embed-dim", type=int, default=256)
-    p.add_argument("--aud-embed-dim", type=int, default=128)
     p.add_argument("--temporal", type=str, default="gru", choices=["gru", "tcn"])
     p.add_argument("--temporal-hidden", type=int, default=256)
 
@@ -555,12 +446,10 @@ def parse_args():
 
     # Misc
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--out-dir", type=str, default="./runs/ava_spk")
+    p.add_argument("--out-dir", type=str, default="./runs/ava_spk_img")
     p.add_argument("--save-every", type=int, default=0)
 
     args = p.parse_args()
-    if args.mel_fmax and args.mel_fmax <= 0:
-        args.mel_fmax = None
     return args
 
 
@@ -571,9 +460,8 @@ def main():
 
     train_loader, val_loader = create_loaders(args)
 
-    model = AVASpkModel(
+    model = AVASpkImgModel(
         img_embed_dim=args.img_embed_dim,
-        aud_embed_dim=args.aud_embed_dim,
         temporal=args.temporal,
         temporal_hidden=args.temporal_hidden
     ).to(device)
@@ -596,7 +484,6 @@ def main():
               f"val:   loss={va['loss']:.4f} acc={va['acc']:.3f} prec={va['prec']:.3f} rec={va['rec']:.3f} f1={va['f1']:.3f} | "
               f"time={dt:.1f}s")
 
-        # Save best by F1
         if va["f1"] > best_f1:
             best_f1 = va["f1"]
             save_checkpoint({

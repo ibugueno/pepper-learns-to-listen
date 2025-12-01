@@ -1,12 +1,24 @@
-python train_ava_activespeaker.py \
-  --train-manifest /media/ignacio/KINGSTON/ava/manifests/train.csv \
-  --val-manifest   /media/ignacio/KINGSTON/ava/manifests/val.csv \
+# prepare dataset
+
+python prepare_ava_activespeaker_imgonly.py \
+    --videos-root ../input/ava/videos/speech \
+    --ann-root ../input/ava/annotations/ava_activespeaker_train_v1.0/ava_activespeaker_train_v1.0 \
+    --output-root ../input/ava/ava_spk_img \
+    --train-ratio 0.8 \
+    --fps-assumed 25.0
+
+
+# train
+
+python train_ava_activespeaker_imgonly.py \
+  --train-manifest /ruta/manifests/ava_spk_train.csv \
+  --val-manifest   /ruta/manifests/ava_spk_val.csv \
   --img-size 160 \
-  --num-frames 32 --fps 25 \
-  --batch-size 16 --num-workers 8 \
-  --epochs 30 --lr 3e-4 --opt adamw --weight-decay 1e-4 \
-  --temporal gru --temporal-hidden 256 \
-  --sample-rate 16000 --n-mels 64 --mel-fmin 50 --mel-fmax 0 \
-  --audio-gain-jitter 3.0 \
-  --out-dir ./runs/ava_spk_gru \
-  --amp
+  --num-frames 32 \
+  --batch-size 32 \
+  --epochs 50 \
+  --temporal gru \
+  --temporal-hidden 256 \
+  --lr 3e-4 \
+  --opt adamw \
+  --out-dir ./runs/ava_spk_img_gru32

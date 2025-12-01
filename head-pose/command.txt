@@ -16,7 +16,7 @@ python 1_build_biwi_crops_and_csv.py \
   --val-csv   /media/ignacio/KINGSTON/biwi-kinect-head/crops_yolo/val_yolo.csv \
   --val-split 0.2 \
   --pad 15 \
-  --abs-paths \
+  --abs-paths \e
   --yolo-model yolov8n-face.pt \
   --yolo-conf 0.4 \
   --yolo-img-size 640
@@ -24,7 +24,7 @@ python 1_build_biwi_crops_and_csv.py \
 
 # for training
 
-python 2_train_biwi_vit_rgbd.py \
+python 2_train_biwi_vit.py \
   --train-manifest /app/input/biwi-kinect-head/crops_yolo/train_yolo.csv \
   --val-manifest   /app/input/biwi-kinect-head/crops_yolo/val_yolo.csv \
   --data-root      /app/input/biwi-kinect-head \
@@ -36,4 +36,16 @@ python 2_train_biwi_vit_rgbd.py \
   --model vit_base_patch16_224 \
   --pretrained \
   --epochs 50 \
-  --out-dir /home/ignacio.bugueno/cachefs/cis/input/biwi-kinect-head/runs_vit_rgbd
+  --out-dir /app/output/biwi-kinect-head/runs_vit_rgbd
+
+  # for evaluate
+
+  python 3_eval_biwi_vit_rgbd.py \
+  --manifest  /app/input/biwi-kinect-head/crops_yolo/val_yolo.csv \
+  --data-root /app/input/biwi-kinect-head \
+  --checkpoint /app/output/biwi-kinect-head/runs_vit_rgbd/best.pt \
+  --out-dir /app/output/biwi-kinect-head/eval_vit_rgbd_val \
+  --batch-size 64 \
+  --num-workers 8 \
+  --gpu 0
+
