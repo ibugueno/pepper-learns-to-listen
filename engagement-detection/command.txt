@@ -1,21 +1,21 @@
 #prepare
 
-root@67aaa64b6a3e:/app/lip-activity# python 1_prepare_dipser_engagement.py \
+
+root@67aaa64b6a3e:/app/engagement-detection# python prepare_dipser_engagement.py \
     --dipser-root /app/input/dipser/DIPSER/V5/DIPSER \
-    --out-root    /app/input/dipser/engagement_v1 \
+    --out-root    /app/input/dipser/engagement_single_v1 \
     --labeler-json labeler_01.json \
-    --min-frames 32 \
+    --min-frames-per-subject 8 \
     --val-ratio 0.2
 
 
 #train
 
-root@67aaa64b6a3e:/app/lip-activity# python 2_train_engagement_dipser_vit.py \
-    --train-manifest /app/input/dipser/engagement_v1/manifests/manifest_train.csv \
-    --val-manifest   /app/input/dipser/engagement_v1/manifests/manifest_val.csv \
+root@67aaa64b6a3e:/app/engagement-detection# python train_engagement_dipser_single.py \
+    --train-csv /app/input/dipser/engagement_single_v1/train.csv \
+    --val-csv   /app/input/dipser/engagement_single_v1/val.csv \
     --backbone vit_b16 \
     --img-size 224 \
-    --num-frames 16 \
-    --batch-size 16 \
+    --batch-size 32 \
     --epochs 30 \
-    --out-dir /app/output/dipser_vit_engagement
+    --out-dir /app/output/dipser_single_vit

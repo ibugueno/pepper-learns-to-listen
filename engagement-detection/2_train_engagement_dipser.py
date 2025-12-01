@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-# train_engagement_dipser_vit.py
-# Engagement detection over DIPSER using visual-only ViT/ResNet + GRU/TCN.
+# train_engagement_dipser_single.py
+#
+# Single-frame engagement classifier sobre DIPSER.
+# Lee CSV con columnas: image_path,label,clip_id,datetime
+# Backbone: resnet18 o vit_b16 (solo imagen).
 
 import os
 import csv
-import glob
 import time
 import json
 import random
@@ -23,9 +25,7 @@ import torchvision.transforms as T
 from torchvision import models as tvm
 
 
-# ----------------------------------------------------
-# Utils
-# ----------------------------------------------------
+# ---------------- Utils ----------------
 def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
@@ -33,29 +33,15 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 
-def count_params(model: nn.Module):
+def count_params(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-# ----------------------------------------------------
-# Dataset
-# ----------------------------------------------------
-class DIPSERDataset(Dataset):
-    """
-    Manifest CSV columns:
-        clip_id,frames_dir,labels_path
-
-    - frames_dir: folder with ordered face crops *.png/*.jpg
-    - labels_path: .npy array of shape [N] with values in {0,...,n_classes-1}
-    """
-
-    def __init__(self, manifest_path, num_frames, img_size, train, n_classes,
-                 fps=25.0, augment=True):
-        self.entries = self._read_manifest(manifest_path)
-        self.num_frames = num_frames
-        self.train = train
+# ---------------- Dataset ----------------
+class DipserSingleFrameDataset(Dataset):
+    def __init__(self, csv_path: str, img_size: int, train: bool, n_classes: int, augment: bool = True):
+        self.samples = self._read_csv(csv_path)
         self.n_classes = n_classes
-        self.fps = fps
 
         normalize = T.Normalize(mean=(0.5, 0.5, 0.5),
                                 std=(0.5, 0.5, 0.5))
@@ -64,8 +50,7 @@ class DIPSERDataset(Dataset):
                 T.Resize((img_size, img_size)),
                 T.ColorJitter(0.2, 0.2, 0.2, 0.05),
                 T.RandomHorizontalFlip(p=0.5),
-                T.RandomAffine(degrees=10, translate=(0.05, 0.05),
-                               scale=(0.95, 1.05)),
+                T.RandomAffine(degrees=10, translate=(0.05, 0.05), scale=(0.95, 1.05)),
                 T.ToTensor(),
                 normalize,
             ])
@@ -76,306 +61,260 @@ class DIPSERDataset(Dataset):
                 normalize,
             ])
 
-    def _read_manifest(self, path):
+    def _read_csv(self, path: str) -> List[Dict]:
         out = []
         with open(path, "r") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                frames = sorted(glob.glob(os.path.join(row["frames_dir"], "*.jpg")))
-                if len(frames) == 0:
-                    frames = sorted(glob.glob(os.path.join(row["frames_dir"], "*.png")))
-                if len(frames) == 0:
+                img = row["image_path"]
+                lbl = int(row["label"])
+                if not os.path.isfile(img):
                     continue
-                labels_path = row["labels_path"]
-                if not os.path.isfile(labels_path):
-                    continue
-                out.append({"clip_id": row["clip_id"],
-                            "frames": frames,
-                            "labels": labels_path})
+                out.append({"image_path": img, "label": lbl})
+        if not out:
+            raise RuntimeError(f"No samples in {path}")
         return out
 
     def __len__(self):
-        return len(self.entries)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        e = self.entries[idx]
-        frames = e["frames"]
-        labels = np.load(e["labels"]).astype(np.int64)
-
-        max_start = max(0, len(frames) - self.num_frames)
-        start = random.randint(0, max_start) if self.train else (max_start // 2)
-
-        imgs = []
-        for i in range(start, start + self.num_frames):
-            i = min(i, len(frames) - 1)
-            img = Image.open(frames[i]).convert("RGB")
-            imgs.append(self.tf(img))
-        imgs = torch.stack(imgs, dim=0)  # [T, C, H, W]
-
-        y = labels[start:start + self.num_frames]
-        if len(y) < self.num_frames:
-            pad = self.num_frames - len(y)
-            y = np.pad(y, (0, pad), mode="edge")
-        y = torch.tensor(y, dtype=torch.long)  # [T]
-
-        return imgs, y, {"clip_id": e["clip_id"], "start": start}
+        s = self.samples[idx]
+        img = Image.open(s["image_path"]).convert("RGB")
+        x = self.tf(img)
+        y = torch.tensor(s["label"], dtype=torch.long)
+        return x, y
 
 
-# ----------------------------------------------------
-# Model (ViT/ResNet + GRU/TCN)
-# ----------------------------------------------------
-class VisualBackbone(nn.Module):
-    def __init__(self, out_dim=256, backbone="resnet18"):
+# ---------------- Model ----------------
+class VisualClassifier(nn.Module):
+    def __init__(self, n_classes: int, backbone: str = "resnet18"):
         super().__init__()
         self.backbone_name = backbone
 
         if backbone == "resnet18":
             m = tvm.resnet18(weights=tvm.ResNet18_Weights.DEFAULT)
             feat_dim = m.fc.in_features
-            m.fc = nn.Identity()
-            self.backbone = m
-            self.proj = nn.Linear(feat_dim, out_dim)
+            m.fc = nn.Linear(feat_dim, n_classes)
+            self.net = m
 
         elif backbone == "vit_b16":
             m = tvm.vit_b_16(weights=tvm.ViT_B_16_Weights.DEFAULT)
-            # cabeza de clasificación -> identidad
             feat_dim = m.heads.head.in_features
-            m.heads.head = nn.Identity()
-            self.backbone = m
-            self.proj = nn.Linear(feat_dim, out_dim)
+            m.heads.head = nn.Linear(feat_dim, n_classes)
+            self.net = m
         else:
             raise ValueError(f"Backbone no soportado: {backbone}")
 
-    def forward(self, x_btchw):
-        B, T = x_btchw.shape[:2]
-        x = x_btchw.reshape(B * T, *x_btchw.shape[2:])
-        f = self.backbone(x)   # [B*T, feat_dim]
-        f = self.proj(f)       # [B*T, out_dim]
-        return f.view(B, T, -1)
+    def forward(self, x):
+        return self.net(x)
 
 
-class TemporalHeadGRU(nn.Module):
-    def __init__(self, in_dim, hidden, layers, n_classes):
-        super().__init__()
-        self.gru = nn.GRU(input_size=in_dim, hidden_size=hidden,
-                          num_layers=layers, batch_first=True,
-                          bidirectional=True)
-        self.fc = nn.Sequential(
-            nn.Linear(hidden * 2, hidden),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden, n_classes)
-        )
+# ---------------- Train / Eval ----------------
+def train_one_epoch(model, loader, optimizer, device, scaler=None):
+    model.train()
+    total_loss = 0.0
+    total_acc = 0.0
+    n = 0
 
-    def forward(self, z_btd):
-        h, _ = self.gru(z_btd)           # [B, T, 2H]
-        return self.fc(h)                # [B, T, C]
+    ce = nn.CrossEntropyLoss()
 
+    for x, y in loader:
+        x = x.to(device)
+        y = y.to(device)
 
-class TemporalHeadTCN(nn.Module):
-    def __init__(self, in_dim, hidden, layers, n_classes):
-        super().__init__()
-        ch = [in_dim] + [hidden] * layers
-        blocks = []
-        for i in range(layers):
-            dil = 2 ** i
-            blocks += [
-                nn.Conv1d(ch[i], ch[i+1], kernel_size=3,
-                          padding=dil, dilation=dil),
-                nn.ReLU(inplace=True),
-            ]
-        self.tcn = nn.Sequential(*blocks)
-        self.fc = nn.Sequential(
-            nn.Linear(hidden, hidden),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden, n_classes)
-        )
+        optimizer.zero_grad(set_to_none=True)
 
-    def forward(self, z_btd):
-        x = z_btd.transpose(1, 2)       # [B, D, T]
-        y = self.tcn(x).transpose(1, 2) # [B, T, H]
-        return self.fc(y)
-
-
-class EngageModel(nn.Module):
-    def __init__(self, embed_dim, temporal, hidden, layers, n_classes,
-                 backbone="resnet18"):
-        super().__init__()
-        self.visual = VisualBackbone(out_dim=embed_dim, backbone=backbone)
-        if temporal == "gru":
-            self.temporal = TemporalHeadGRU(embed_dim, hidden, layers, n_classes)
+        if scaler is not None:
+            with torch.cuda.amp.autocast():
+                logits = model(x)
+                loss = ce(logits, y)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
         else:
-            self.temporal = TemporalHeadTCN(embed_dim, hidden, layers, n_classes)
+            logits = model(x)
+            loss = ce(logits, y)
+            loss.backward()
+            optimizer.step()
 
-    def forward(self, x_btchw):
-        v = self.visual(x_btchw)   # [B, T, D]
-        return self.temporal(v)    # [B, T, C]
+        total_loss += loss.item() * x.size(0)
+        preds = logits.argmax(dim=1)
+        total_acc += (preds == y).float().sum().item()
+        n += x.size(0)
 
-
-# ----------------------------------------------------
-# Training
-# ----------------------------------------------------
-def loss_fn(logits, labels):
-    # logits: [B, T, C], labels: [B, T]
-    B, T, C = logits.shape
-    return nn.functional.cross_entropy(
-        logits.reshape(B*T, C), labels.reshape(B*T)
-    )
+    return {
+        "loss": total_loss / n,
+        "acc": total_acc / n
+    }
 
 
 @torch.no_grad()
-def frame_metrics(logits, labels, C):
-    pred = logits.argmax(dim=-1).reshape(-1)
-    t = labels.reshape(-1)
-    acc = (pred == t).float().mean().item()
-    # macro-F1
+def validate(model, loader, device, n_classes: int):
+    model.eval()
+    ce = nn.CrossEntropyLoss()
+    total_loss = 0.0
+    total_acc = 0.0
+    n = 0
+
+    # opcional: macro-F1
+    all_preds = []
+    all_labels = []
+
+    for x, y in loader:
+        x = x.to(device)
+        y = y.to(device)
+        logits = model(x)
+        loss = ce(logits, y)
+
+        total_loss += loss.item() * x.size(0)
+        preds = logits.argmax(dim=1)
+        total_acc += (preds == y).float().sum().item()
+        n += x.size(0)
+
+        all_preds.append(preds.cpu())
+        all_labels.append(y.cpu())
+
+    all_preds = torch.cat(all_preds)
+    all_labels = torch.cat(all_labels)
+
+    # macro-F1 simple
     f1s = []
-    for c in range(C):
-        tp = ((pred == c) & (t == c)).sum().item()
-        fp = ((pred == c) & (t != c)).sum().item()
-        fn = ((pred != c) & (t == c)).sum().item()
+    for c in range(n_classes):
+        tp = ((all_preds == c) & (all_labels == c)).sum().item()
+        fp = ((all_preds == c) & (all_labels != c)).sum().item()
+        fn = ((all_preds != c) & (all_labels == c)).sum().item()
         prec = tp / max(1, tp + fp)
-        rec  = tp / max(1, tp + fn)
+        rec = tp / max(1, tp + fn)
         if prec + rec == 0:
             f1s.append(0.0)
         else:
-            f1s.append(2*prec*rec/(prec+rec))
-    return acc, float(np.mean(f1s))
+            f1s.append(2 * prec * rec / (prec + rec))
+
+    macro_f1 = float(np.mean(f1s))
+
+    return {
+        "loss": total_loss / n,
+        "acc": total_acc / n,
+        "macro_f1": macro_f1
+    }
 
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--train-manifest", required=True)
-    p.add_argument("--val-manifest", required=True)
-    p.add_argument("--img-size", type=int, default=160)
-    p.add_argument("--num-frames", type=int, default=32)
-    p.add_argument("--batch-size", type=int, default=8)
+# ---------------- Main ----------------
+def parse_args():
+    p = argparse.ArgumentParser(description="DIPSER single-frame engagement classifier")
+    p.add_argument("--train-csv", type=str, required=True)
+    p.add_argument("--val-csv", type=str, required=True)
+
+    p.add_argument("--img-size", type=int, default=224)
+    p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--n-classes", type=int, default=3)
 
     p.add_argument("--backbone", type=str,
                    choices=["resnet18", "vit_b16"],
                    default="vit_b16")
-    p.add_argument("--temporal", choices=["gru", "tcn"], default="gru")
-    p.add_argument("--temporal-hidden", type=int, default=256)
-    p.add_argument("--temporal-layers", type=int, default=1)
-    p.add_argument("--embed-dim", type=int, default=256)
 
-    p.add_argument("--epochs", type=int, default=20)
+    p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--opt", choices=["adamw", "adam", "sgd"], default="adamw")
-
-    p.add_argument("--out-dir", default="./runs/dipser_engagement")
+    p.add_argument("--opt", type=str, choices=["adamw", "adam", "sgd"], default="adamw")
+    p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--amp", action="store_true")
-    args = p.parse_args()
 
-    # Si usas ViT, lo normal es img_size=224
-    if args.backbone == "vit_b16" and args.img_size < 224:
-        print("[WARN] Con vit_b16 es recomendable --img-size 224. Ajustando...")
-        args.img_size = 224
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--out-dir", type=str, default="./runs/dipser_single")
+    return p.parse_args()
 
-    set_seed(42)
+
+def main():
+    args = parse_args()
+    set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    train_ds = DIPSERDataset(args.train_manifest, args.num_frames, args.img_size,
-                             True, args.n_classes)
-    val_ds   = DIPSERDataset(args.val_manifest, args.num_frames, args.img_size,
-                             False, args.n_classes)
+    # ViT necesita 224x224 típicamente
+    if args.backbone == "vit_b16" and args.img_size < 224:
+        print("[WARN] Ajustando img_size a 224 para vit_b16")
+        args.img_size = 224
+
+    train_ds = DipserSingleFrameDataset(args.train_csv, args.img_size, train=True,
+                                        n_classes=args.n_classes, augment=True)
+    val_ds   = DipserSingleFrameDataset(args.val_csv, args.img_size, train=False,
+                                        n_classes=args.n_classes, augment=False)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
                               shuffle=True, num_workers=args.num_workers,
-                              drop_last=True)
-    val_loader   = DataLoader(val_ds, batch_size=args.batch_size,
-                              shuffle=False, num_workers=args.num_workers)
+                              pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size,
+                            shuffle=False, num_workers=args.num_workers,
+                            pin_memory=True)
 
-    model = EngageModel(args.embed_dim,
-                        args.temporal,
-                        args.temporal_hidden,
-                        args.temporal_layers,
-                        args.n_classes,
-                        backbone=args.backbone).to(device)
+    model = VisualClassifier(n_classes=args.n_classes, backbone=args.backbone).to(device)
     print("Trainable params:", count_params(model))
 
     if args.opt == "adamw":
-        optimizer = optim.AdamW(model.parameters(), lr=args.lr)
+        optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     elif args.opt == "adam":
-        optimizer = optim.Adam(model.parameters(), lr=args.lr)
+        optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     else:
-        optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
+        optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9,
+                              weight_decay=args.weight_decay, nesterov=True)
 
-    scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
+    scaler = torch.cuda.amp.GradScaler(enabled=(args.amp and device.type == "cuda"))
+
     best_f1 = 0.0
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    history = {"args": vars(args), "epochs": []}
 
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
-        model.train()
-        train_loss = 0.0
-        train_acc = 0.0
-        train_f1 = 0.0
-        n_train = 0
-
-        for frames, labels, _ in train_loader:
-            frames = frames.to(device)  # [B, T, C, H, W]
-            labels = labels.to(device)  # [B, T]
-
-            optimizer.zero_grad(set_to_none=True)
-            if args.amp:
-                with torch.cuda.amp.autocast():
-                    logits = model(frames)
-                    loss = loss_fn(logits, labels)
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                logits = model(frames)
-                loss = loss_fn(logits, labels)
-                loss.backward()
-                optimizer.step()
-
-            train_loss += loss.item() * frames.size(0)
-            acc, f1 = frame_metrics(logits.detach(), labels.detach(), args.n_classes)
-            train_acc += acc * frames.size(0)
-            train_f1 += f1 * frames.size(0)
-            n_train += frames.size(0)
-
-        train_loss /= n_train
-        train_acc  /= n_train
-        train_f1   /= n_train
-
-        # Eval
-        model.eval()
-        val_loss = 0.0
-        val_acc = 0.0
-        val_f1 = 0.0
-        n_val = 0
-
-        with torch.no_grad():
-            for frames, labels, _ in val_loader:
-                frames = frames.to(device)
-                labels = labels.to(device)
-                logits = model(frames)
-                loss = loss_fn(logits, labels)
-                val_loss += loss.item() * frames.size(0)
-                acc, f1 = frame_metrics(logits, labels, args.n_classes)
-                val_acc += acc * frames.size(0)
-                val_f1  += f1 * frames.size(0)
-                n_val   += frames.size(0)
-
-        val_loss /= n_val
-        val_acc  /= n_val
-        val_f1   /= n_val
-
+        tr = train_one_epoch(model, train_loader, optimizer, device, scaler)
+        va = validate(model, val_loader, device, args.n_classes)
         dt = time.time() - t0
-        print(f"[{epoch:03d}/{args.epochs}] "
-              f"train: loss={train_loss:.4f} acc={train_acc:.3f} f1={train_f1:.3f} | "
-              f"val: loss={val_loss:.4f} acc={val_acc:.3f} f1={val_f1:.3f} | "
-              f"time={dt:.1f}s")
 
-        if val_f1 > best_f1:
-            best_f1 = val_f1
-            os.makedirs(args.out_dir, exist_ok=True)
-            torch.save(model.state_dict(), os.path.join(args.out_dir, "best.pt"))
+        print(
+            f"[{epoch:03d}/{args.epochs}] "
+            f"train: loss={tr['loss']:.4f} acc={tr['acc']:.3f} | "
+            f"val: loss={va['loss']:.4f} acc={va['acc']:.3f} f1={va['macro_f1']:.3f} | "
+            f"time={dt:.1f}s"
+        )
 
-    print("Done. Best val macro-F1 =", best_f1)
+        history["epochs"].append({
+            "epoch": epoch,
+            "train": tr,
+            "val": va,
+            "time_sec": dt,
+        })
+
+        # guardar último
+        torch.save(
+            {
+                "epoch": epoch,
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "metrics": va,
+                "args": vars(args),
+            },
+            os.path.join(args.out_dir, "last.pt"),
+        )
+        with open(os.path.join(args.out_dir, "history.json"), "w") as f:
+            json.dump(history, f, indent=2)
+
+        # guardar mejor por F1
+        if va["macro_f1"] > best_f1:
+            best_f1 = va["macro_f1"]
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "metrics": va,
+                    "args": vars(args),
+                },
+                os.path.join(args.out_dir, "best.pt"),
+            )
+
+    print(f"Done. Best val macro-F1: {best_f1:.3f}")
 
 
 if __name__ == "__main__":

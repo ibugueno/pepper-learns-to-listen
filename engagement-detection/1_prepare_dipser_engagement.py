@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# prepare_dipser_engagement_no_copy.py
+# prepare_dipser_engagement_single.py
 #
-# Prepara DIPSER para entrenamiento de engagement SIN copiar imágenes.
-# Usa directamente:
-#   frames_dir = .../subject_XY/images
-#   labels_path = out_root/labels/<group>_<experiment>_<subject>.npy
+# Prepara DIPSER para single-frame engagement:
+#   - Recorre group_XX/experiment_YY/subject_ZZ
+#   - Usa labeler_01.json (por defecto) y el campo "attention"
+#   - NO copia imágenes, sólo genera:
+#       out_root/train.csv
+#       out_root/val.csv
 #
-# Manifest columns: clip_id,frames_dir,labels_path
+# Columnas CSV: image_path,label,clip_id,datetime
 
 import os
 import json
@@ -19,7 +21,7 @@ import numpy as np
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Prepare DIPSER engagement (no image copy)")
+    p = argparse.ArgumentParser(description="Prepare DIPSER engagement (single-frame)")
     p.add_argument(
         "--dipser-root",
         type=str,
@@ -30,7 +32,7 @@ def parse_args():
         "--out-root",
         type=str,
         required=True,
-        help="Carpeta de salida para labels y manifests",
+        help="Carpeta de salida para los CSV (train/val)",
     )
     p.add_argument(
         "--labeler-json",
@@ -39,16 +41,16 @@ def parse_args():
         help="Nombre del JSON de anotaciones (p.ej. labeler_01.json)",
     )
     p.add_argument(
-        "--min-frames",
+        "--min-frames-per-subject",
         type=int,
-        default=32,
-        help="Mínimo de frames etiquetados para mantener un clip",
+        default=8,
+        help="Descartar sujetos con menos de N frames anotados válidos",
     )
     p.add_argument(
         "--val-ratio",
         type=float,
         default=0.2,
-        help="Proporción de clips para validación (resto para train)",
+        help="Proporción de muestras para validación (resto para train)",
     )
     return p.parse_args()
 
@@ -88,12 +90,9 @@ def load_attention_map(json_path: str) -> Dict[str, int]:
     return att_map
 
 
-def collect_clips(args):
+def collect_samples(args):
     dipser_root = args.dipser_root
-    out_labels_root = os.path.join(args.out_root, "labels")
-    ensure_dir(out_labels_root)
-
-    clips = []  # lista de dicts: {clip_id, frames_dir, labels_path}
+    all_samples = []  # lista de dicts: image_path,label,clip_id,datetime
 
     for group in sorted(d for d in os.listdir(dipser_root) if d.startswith("group_")):
         group_dir = os.path.join(dipser_root, group)
@@ -123,77 +122,68 @@ def collect_clips(args):
                 if not att_map:
                     continue
 
-                # Construimos lista (filename, clase) sólo para los frames que existan
-                entries = []
+                subject_samples = []
+                clip_id = f"{group}_{exp}_{subj}"
+
                 for dt, att in att_map.items():
                     fname = datetime_to_filename(dt)
                     img_path = os.path.join(images_dir, fname)
                     if os.path.isfile(img_path):
-                        # attention {1,2,3} -> clases {0,1,2}
-                        entries.append((fname, att - 1))
+                        # attention {1,2,3,...} -> clases 0,1,2,... (puedes cambiarlo luego)
+                        cls = att - 1
+                        subject_samples.append({
+                            "image_path": os.path.abspath(img_path),
+                            "label": cls,
+                            "clip_id": clip_id,
+                            "datetime": dt
+                        })
 
-                if len(entries) < args.min_frames:
+                if len(subject_samples) < args.min_frames_per_subject:
                     continue
 
-                # Ordenar por nombre (aprox. temporal)
-                entries.sort(key=lambda x: x[0])
+                subject_samples.sort(key=lambda s: s["image_path"])
+                all_samples.extend(subject_samples)
+                print(f"{clip_id}: {len(subject_samples)} muestras válidas")
 
-                clip_id = f"{group}_{exp}_{subj}"
-                labels = np.array([cls for _, cls in entries], dtype=np.int64)
-                labels_path = os.path.join(out_labels_root, f"{clip_id}.npy")
-                np.save(labels_path, labels)
-
-                clips.append(
-                    {
-                        "clip_id": clip_id,
-                        "frames_dir": images_dir,   # 👈 usamos el directorio ORIGINAL
-                        "labels_path": labels_path,
-                    }
-                )
-
-                print(f"OK clip {clip_id}: {len(labels)} frames etiquetados")
-
-    print(f"Total clips válidos: {len(clips)}")
-    return clips
+    print(f"Total de muestras single-frame: {len(all_samples)}")
+    return all_samples
 
 
-def split_and_write_manifests(clips: List[Dict], out_root: str, val_ratio: float):
-    random.shuffle(clips)
-    n_total = len(clips)
+def split_and_write_csv(samples: List[Dict], out_root: str, val_ratio: float):
+    ensure_dir(out_root)
+    random.shuffle(samples)
+    n_total = len(samples)
     n_val = int(round(n_total * val_ratio))
-    val_clips = clips[:n_val]
-    train_clips = clips[n_val:]
+    val_samples = samples[:n_val]
+    train_samples = samples[n_val:]
 
-    def write_manifest(path, rows):
-        fieldnames = ["clip_id", "frames_dir", "labels_path"]
+    def write_csv(path, rows):
+        fieldnames = ["image_path", "label", "clip_id", "datetime"]
         with open(path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fieldnames)
             w.writeheader()
             for r in rows:
                 w.writerow(r)
 
-    manifests_dir = os.path.join(out_root, "manifests")
-    os.makedirs(manifests_dir, exist_ok=True)
-    train_manifest = os.path.join(manifests_dir, "manifest_train.csv")
-    val_manifest = os.path.join(manifests_dir, "manifest_val.csv")
+    train_csv = os.path.join(out_root, "train.csv")
+    val_csv = os.path.join(out_root, "val.csv")
+    write_csv(train_csv, train_samples)
+    write_csv(val_csv, val_samples)
 
-    write_manifest(train_manifest, train_clips)
-    write_manifest(val_manifest, val_clips)
-
-    print(f"Train manifest: {train_manifest} ({len(train_clips)} clips)")
-    print(f"Val   manifest: {val_manifest} ({len(val_clips)} clips)")
+    print(f"train.csv: {train_csv} ({len(train_samples)} filas)")
+    print(f"val.csv:   {val_csv} ({len(val_samples)} filas)")
 
 
 def main():
     args = parse_args()
     random.seed(42)
 
-    clips = collect_clips(args)
-    if not clips:
-        print("No se encontraron clips válidos. Revisa rutas / labeler_json / min_frames.")
+    samples = collect_samples(args)
+    if not samples:
+        print("No se encontraron muestras válidas. Revisa rutas / labeler_json.")
         return
 
-    split_and_write_manifests(clips, args.out_root, args.val_ratio)
+    split_and_write_csv(samples, args.out_root, args.val_ratio)
 
 
 if __name__ == "__main__":
