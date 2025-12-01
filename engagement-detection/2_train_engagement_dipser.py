@@ -67,7 +67,15 @@ class DipserSingleFrameDataset(Dataset):
             reader = csv.DictReader(f)
             for row in reader:
                 img = row["image_path"]
-                lbl = int(row["label"]) - 1
+
+                orig = int(row["label"])       
+
+                if orig in (1, 2):
+                    lbl = 0                  # low engagement
+                else:
+                    lbl = 1                  # high engagement (3,4,5)
+
+
                 if not os.path.isfile(img):
                     continue
                 out.append({"image_path": img, "label": lbl})

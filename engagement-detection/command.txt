@@ -19,5 +19,5 @@ root@67aaa64b6a3e:/app/engagement-detection# python 2_train_engagement_dipser.py
     --img-size 224 \
     --batch-size 32 \
     --epochs 30 \
-    --n-classes 4 \
+    --n-classes 2 \
     --out-dir /app/output/dipser_single_vit
