@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # 3_eval_biwi_vit_rgbd.py
 #
-# Evaluate ViT-B/16 RGB(D) head pose model on BIWI and
+# Evaluate ViT-B/16 head pose model on BIWI and
 # generate K PDF (vector) reports for the most accurate
 # validation samples, showing:
 #   - RGB image
 #   - Depth image (optional, dummy if not available)
 #   - Mask image
-#   - GT and predicted head pose drawn
+#   - GT and predicted head pose drawn on RGB
 #   - Text with per-axis MAE and mean MAE
 #
 # Text is in English.
@@ -58,7 +58,7 @@ class BiwiHeadPoseRGBDDataset(Dataset):
     We use:
         - image_path  -> RGB
         - mask_path   -> Mask
-        - depth: *optional*, we try to infer from image_path by replacing tokens
+        - depth: optional, inferred from image_path by heuristics
     """
     def __init__(self, csv_path: str, data_root: str):
         self.data_root = data_root
@@ -90,18 +90,17 @@ class BiwiHeadPoseRGBDDataset(Dataset):
         Try to infer a plausible depth path from the RGB path.
         You may need to adapt this to your actual directory layout.
         """
-        # Example heuristics: replace 'rgb'->'depth' or 'color'->'depth'
         candidates = []
         dirname, fname = os.path.split(rgb_path)
 
-        # 1) Replace 'rgb' with 'depth' in the directory path
+        # Replace 'rgb' -> 'depth'
         if "rgb" in dirname:
             candidates.append(os.path.join(dirname.replace("rgb", "depth"), fname))
+        # Replace 'color' -> 'depth'
         if "color" in dirname:
             candidates.append(os.path.join(dirname.replace("color", "depth"), fname))
 
-        # 2) Same dir, different subfolder 'depth'
-        # e.g. /.../rgb/frame.png -> /.../depth/frame.png
+        # Parent/depth/fname
         parent = os.path.dirname(dirname)
         depth_dir = os.path.join(parent, "depth")
         candidates.append(os.path.join(depth_dir, fname))
@@ -110,7 +109,6 @@ class BiwiHeadPoseRGBDDataset(Dataset):
             if os.path.isfile(c):
                 return c
 
-        # If nothing found, return empty string
         return ""
 
     def __len__(self):
@@ -125,26 +123,25 @@ class BiwiHeadPoseRGBDDataset(Dataset):
         rgb_path = self._resolve_path(rgb_path_rel)
         mask_path = self._resolve_path(mask_path_rel)
 
-        # Load RGB
+        # RGB
         rgb = Image.open(rgb_path).convert("RGB")
         rgb_np = np.array(rgb)  # H,W,3
 
-        # Try to get depth
+        # Depth (optional)
         depth_path = self._infer_depth_path(rgb_path)
         if depth_path and os.path.isfile(depth_path):
             depth = Image.open(depth_path)
             depth_np = np.array(depth)
         else:
-            # Dummy depth: zeros with same H,W
             depth_np = np.zeros(rgb_np.shape[:2], dtype=np.float32)
 
         # Mask
         mask = Image.open(mask_path).convert("L")
         mask_np = np.array(mask)
 
-        # For the model, we only need RGB resized to 224x224
+        # Model input: RGB resized to 224x224
         rgb_resized = rgb.resize((224, 224), Image.BILINEAR)
-        rgb_t = torch.from_numpy(np.array(rgb_resized)).float() / 255.0  # H,W,3
+        rgb_t = torch.from_numpy(np.array(rgb_resized)).float() / 255.0
         rgb_t = rgb_t.permute(2, 0, 1)  # C,H,W
 
         # Angles
@@ -167,24 +164,31 @@ class BiwiHeadPoseRGBDDataset(Dataset):
 
 
 # -----------------------------
-# Model
+# Model (matching training checkpoint: vit + reg_head)
 # -----------------------------
 class ViTHeadPoseModel(nn.Module):
     """
     ViT-B/16 (vit_base_patch16_224) with a 3D regression head (yaw, pitch, roll).
+
+    The module names are:
+        - self.vit      (backbone)
+        - self.reg_head (3D regression)
+    to match checkpoints that store keys like "vit.*" and "reg_head.*".
     """
-    def __init__(self, model_name: str = "vit_base_patch16_224", pretrained: bool = False):
+    def __init__(self, model_name: str = "vit_base_patch16_224"):
         super().__init__()
-        self.backbone = timm.create_model(model_name, pretrained=pretrained)
-        in_features = self.backbone.head.in_features
-        self.backbone.reset_classifier(0)
-        self.head = nn.Linear(in_features, 3)
+        # num_classes=0 => timm returns features instead of logits
+        self.vit = timm.create_model(model_name, pretrained=False, num_classes=0)
+        # timm ViT usually has .num_features for the feature dimension
+        in_features = getattr(self.vit, "num_features", None)
+        if in_features is None:
+            # fallback, in case of older timm
+            in_features = self.vit.head.in_features
+        self.reg_head = nn.Linear(in_features, 3)
 
     def forward(self, x):
-        feat = self.backbone.forward_features(x)
-        if isinstance(feat, (list, tuple)):
-            feat = feat[-1]
-        out = self.head(feat)
+        feat = self.vit(x)  # [B, D] because num_classes=0
+        out = self.reg_head(feat)  # [B, 3]
         return out
 
 
@@ -341,7 +345,6 @@ def evaluate_and_generate_pdfs(args):
 
     model = ViTHeadPoseModel(
         model_name=args.model_name,
-        pretrained=False,
     ).to(device)
 
     ckpt = torch.load(args.checkpoint, map_location=device)
