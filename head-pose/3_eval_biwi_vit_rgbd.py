@@ -248,6 +248,9 @@ class ViTHeadPoseModel(nn.Module):
 # -----------------------------
 # Visualization utilities
 # -----------------------------
+# -----------------------------
+# Visualization utilities
+# -----------------------------
 def draw_head_pose_arrow(ax, img, yaw_deg, pitch_deg, color="lime", label=""):
     """
     Draw a simple 2D arrow on the image to represent head pose direction.
@@ -259,9 +262,11 @@ def draw_head_pose_arrow(ax, img, yaw_deg, pitch_deg, color="lime", label=""):
     yaw = np.deg2rad(yaw_deg)
     pitch = np.deg2rad(pitch_deg)
 
+    # Ajuste simple: izquierda/derecha con yaw, arriba/abajo con pitch
     dx = np.sin(yaw) * np.cos(pitch)
     dy = -np.sin(pitch)
 
+    # Flecha más larga
     length = min(h, w) * 0.5
     x2 = cx + dx * length
     y2 = cy + dy * length
@@ -269,12 +274,12 @@ def draw_head_pose_arrow(ax, img, yaw_deg, pitch_deg, color="lime", label=""):
     ax.arrow(
         cx, cy,
         x2 - cx, y2 - cy,
-        head_width=h * 0.02,
-        head_length=h * 0.03,
+        head_width=h * 0.04,
+        head_length=h * 0.06,
         length_includes_head=True,
         color=color,
-        linewidth=2,
-        alpha=0.9,
+        linewidth=3,
+        alpha=0.95,
     )
     if label:
         ax.text(
@@ -299,46 +304,49 @@ def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
     """
     os.makedirs(out_dir, exist_ok=True)
 
-    rgb = sample["rgb_np"]
+    rgb   = sample["rgb_np"]
     depth = sample["depth_np"]
-    mask = sample["mask_np"]
-    gt = sample["gt_angles"]       # yaw, pitch, roll
-    pred = sample["pred_angles"]   # yaw, pitch, roll
+    mask  = sample["mask_np"]
+    gt    = sample["gt_angles"]       # [yaw, pitch, roll]
+    pred  = sample["pred_angles"]     # [yaw, pitch, roll]
 
-    # -------- Precompute images --------
-    # Copias para dibujar flechas
-    rgb_pred = rgb.copy()
-    rgb_gt   = rgb.copy()
-
-    # DIBUJAR flechas (usa tu función existente)
-    fig_tmp, ax_tmp = plt.subplots()
-    ax_tmp.imshow(rgb_pred)
-    draw_head_pose_arrow(ax_tmp, rgb_pred, pred[0], pred[1], color="red")
-    plt.close(fig_tmp)
-
-    fig_tmp, ax_tmp = plt.subplots()
-    ax_tmp.imshow(rgb_gt)
-    draw_head_pose_arrow(ax_tmp, rgb_gt, gt[0], gt[1], color="lime")
-    plt.close(fig_tmp)
-
-    # -------- Final layout: 5 imágenes --------
     fig, axes = plt.subplots(1, 5, figsize=(25, 5))
 
-    panels = [
-        (rgb, "RGB"),
-        (depth, "Depth"),
-        (mask, "Mask"),
-        (rgb_pred, "Pred Pose"),
-        (rgb_gt, "GT Pose"),
-    ]
+    # 1) RGB original
+    ax = axes[0]
+    ax.imshow(rgb)
+    ax.axis("off")
+    ax.set_title("RGB")
 
-    for ax, (img, title) in zip(axes, panels):
-        if img.ndim == 2:
-            ax.imshow(img, cmap="gray")
-        else:
-            ax.imshow(img)
-        ax.axis("off")
-        ax.set_title(title)
+    # 2) Depth
+    ax = axes[1]
+    if depth.ndim == 2:
+        # Si la depth es todo ceros, se verá negra (posible caso de "no encontrada")
+        ax.imshow(depth, cmap="viridis")
+    else:
+        ax.imshow(depth)
+    ax.axis("off")
+    ax.set_title("Depth")
+
+    # 3) Mask
+    ax = axes[2]
+    ax.imshow(mask, cmap="gray")
+    ax.axis("off")
+    ax.set_title("Mask")
+
+    # 4) RGB con pose predicha (flecha roja)
+    ax = axes[3]
+    ax.imshow(rgb)
+    draw_head_pose_arrow(ax, rgb, pred[0], pred[1], color="red")
+    ax.axis("off")
+    ax.set_title("Pred Pose")
+
+    # 5) RGB con pose GT (flecha verde)
+    ax = axes[4]
+    ax.imshow(rgb)
+    draw_head_pose_arrow(ax, rgb, gt[0], gt[1], color="lime")
+    ax.axis("off")
+    ax.set_title("GT Pose")
 
     pdf_path = os.path.join(out_dir, f"sample_{rank+1:02d}.pdf")
     plt.tight_layout()
@@ -346,6 +354,7 @@ def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
     plt.close(fig)
 
     print(f"[INFO] Saved PDF → {pdf_path}")
+
 
 
 
