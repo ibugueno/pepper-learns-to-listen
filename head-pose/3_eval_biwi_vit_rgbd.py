@@ -316,37 +316,57 @@ def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
     ax = axes[0]
     ax.imshow(rgb)
     ax.axis("off")
-    ax.set_title("RGB")
+    ax.set_title("RGB", fontsize=20)
+
+
+   
 
     # 2) Depth
     ax = axes[1]
     if depth.ndim == 2:
-        # Si la depth es todo ceros, se verá negra (posible caso de "no encontrada")
-        ax.imshow(depth, cmap="viridis")
+        d = depth.astype(np.float32)
+
+        if np.all(d == 0):
+            # Caso típico: no se encontró el archivo de depth y quedó todo en cero
+            ax.imshow(d, cmap="gray")
+            ax.set_title("Depth (all zeros)", fontsize=10)
+        else:
+            # Normalización para visualizar mejor
+            d_min, d_max = d.min(), d.max()
+            if d_max > d_min:
+                d_norm = (d - d_min) / (d_max - d_min)
+            else:
+                d_norm = d
+            ax.imshow(d_norm, cmap="viridis")
+            ax.set_title("Depth", fontsize=20)
     else:
         ax.imshow(depth)
+        ax.set_title("Depth", fontsize=20)
+
     ax.axis("off")
-    ax.set_title("Depth")
+
+
+
 
     # 3) Mask
     ax = axes[2]
     ax.imshow(mask, cmap="gray")
     ax.axis("off")
-    ax.set_title("Mask")
+    ax.set_title("Mask", fontsize=20)
 
     # 4) RGB con pose predicha (flecha roja)
     ax = axes[3]
     ax.imshow(rgb)
     draw_head_pose_arrow(ax, rgb, pred[0], pred[1], color="red")
     ax.axis("off")
-    ax.set_title("Pred Pose")
+    ax.set_title("Pred Pose", fontsize=20)
 
     # 5) RGB con pose GT (flecha verde)
     ax = axes[4]
     ax.imshow(rgb)
     draw_head_pose_arrow(ax, rgb, gt[0], gt[1], color="lime")
     ax.axis("off")
-    ax.set_title("GT Pose")
+    ax.set_title("GT Pose", fontsize=20)
 
     pdf_path = os.path.join(out_dir, f"sample_{rank+1:02d}.pdf")
     plt.tight_layout()
