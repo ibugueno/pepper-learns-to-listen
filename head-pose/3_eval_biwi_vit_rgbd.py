@@ -81,9 +81,39 @@ class BiwiHeadPoseRGBDDataset(Dataset):
         return out
 
     def _resolve_path(self, p: str) -> str:
-        if os.path.isabs(p):
+        """
+        Resuelve la ruta del CSV a una ruta válida dentro del contenedor.
+
+        Casos:
+          - Si es relativa → la unimos a data_root.
+          - Si es absoluta y existe → la usamos tal cual.
+          - Si es absoluta y NO existe (ruta del host) → intentamos
+            re-mapearla para que cuelgue de data_root, usando como ancla
+            'biwi-kinect-head'.
+        """
+        # Caso 1: ruta relativa → data_root + p
+        if not os.path.isabs(p):
+            return os.path.join(self.data_root, p)
+
+        # Caso 2: ruta absoluta que ya existe en el contenedor
+        if os.path.isfile(p):
             return p
-        return os.path.join(self.data_root, p)
+
+        # Caso 3: ruta absoluta del host: intentamos recortar desde 'biwi-kinect-head'
+        marker = "biwi-kinect-head"
+        if marker in p:
+            # p = "/media/.../biwi-kinect-head/crops_yolo/..."
+            _, after = p.split(marker, 1)  # "/crops_yolo/..."
+            after = after.lstrip("/")
+
+            candidate = os.path.join(self.data_root, after)
+            if os.path.isfile(candidate):
+                return candidate
+
+        # Fallback: asumimos que p ya es relativo a data_root (último intento)
+        candidate = os.path.join(self.data_root, os.path.basename(p))
+        return candidate
+
 
     def _infer_depth_path(self, rgb_path: str) -> str:
         """
