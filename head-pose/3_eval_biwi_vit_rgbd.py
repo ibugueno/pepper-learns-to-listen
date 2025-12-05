@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # 3_eval_biwi_vit_rgbd.py
 #
-# Evaluate ViT-B/16 RGBD head pose model on BIWI and
+# Evaluate ViT-B/16 RGBD head-pose model on BIWI and
 # generate K PDF (vector) reports for the most accurate
 # validation samples, showing:
 #   - RGB image
-#   - Depth image (optional, dummy if not available)
+#   - Depth image
 #   - Mask image
 #   - GT and predicted head pose drawn on RGB
-#   - Text with per-axis MAE and mean MAE
+#   - Text with per-axis MAE and mean MAE (deg)
 #
 # Text is in English.
 
@@ -29,36 +29,21 @@ import matplotlib.pyplot as plt
 
 
 # -----------------------------
-# Utils
-# -----------------------------
-def round_recursive(x, ndigits=4):
-    if isinstance(x, float):
-        return round(x, ndigits)
-    if isinstance(x, int):
-        return x
-    if isinstance(x, list):
-        return [round_recursive(v, ndigits) for v in x]
-    if isinstance(x, dict):
-        return {k: round_recursive(v, ndigits) for k, v in x.items()}
-    return x
-
-
-# -----------------------------
-# Dataset (adapted to your CSV)
+# Dataset (RGB + Depth + extras)
 # -----------------------------
 class BiwiHeadPoseRGBDDataset(Dataset):
     """
     BIWI RGB(D) dataset for evaluation.
 
-    CSV expected columns (like your val_yolo.csv):
+    CSV expected columns (like val_yolo.csv):
         image_path, yaw, pitch, roll,
         bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax,
         mask_path, subject, frame_id
 
     We use:
         - image_path  -> RGB
-        - mask_path   -> Mask
-        - depth: optional, inferred from image_path by heuristics
+        - mask_path   -> Mask/Depth
+        - depth_path  is inferred from mask or from path heuristics
     """
     def __init__(self, csv_path: str, data_root: str):
         self.data_root = data_root
@@ -81,52 +66,30 @@ class BiwiHeadPoseRGBDDataset(Dataset):
         return out
 
     def _resolve_path(self, p: str) -> str:
-        """
-        Resuelve la ruta del CSV a una ruta válida dentro del contenedor.
-
-        Casos:
-          - Si es relativa → la unimos a data_root.
-          - Si es absoluta y existe → la usamos tal cual.
-          - Si es absoluta y NO existe (ruta del host) → intentamos
-            re-mapearla para que cuelgue de data_root, usando como ancla
-            'biwi-kinect-head'.
-        """
-        # Caso 1: ruta relativa → data_root + p
-        if not os.path.isabs(p):
-            return os.path.join(self.data_root, p)
-
-        # Caso 2: ruta absoluta que ya existe en el contenedor
-        if os.path.isfile(p):
+        if os.path.isabs(p):
             return p
-
-        # Caso 3: ruta absoluta del host: intentamos recortar desde 'biwi-kinect-head'
-        marker = "biwi-kinect-head"
-        if marker in p:
-            # p = "/media/.../biwi-kinect-head/crops_yolo/..."
-            _, after = p.split(marker, 1)  # "/crops_yolo/..."
-            after = after.lstrip("/")
-
-            candidate = os.path.join(self.data_root, after)
-            if os.path.isfile(candidate):
-                return candidate
-
-        # Fallback: asumimos que p ya es relativo a data_root (último intento)
-        candidate = os.path.join(self.data_root, os.path.basename(p))
-        return candidate
-
+        return os.path.join(self.data_root, p)
 
     def _infer_depth_path(self, rgb_path: str) -> str:
         """
         Try to infer a plausible depth path from the RGB path.
-        You may need to adapt this to your actual directory layout.
+        Adapted to your biwi-kinect-head crops layout.
         """
         candidates = []
         dirname, fname = os.path.split(rgb_path)
 
-        # Replace 'rgb' -> 'depth'
+        # Replace 'rgb_crops_yolo' -> 'mask_crops_yolo'
+        if "rgb_crops_yolo" in dirname:
+            candidates.append(
+                os.path.join(
+                    dirname.replace("rgb_crops_yolo", "mask_crops_yolo"),
+                    fname.replace("_rgb.png", "_mask.png"),
+                )
+            )
+
+        # Replace generic 'rgb' -> 'depth'
         if "rgb" in dirname:
             candidates.append(os.path.join(dirname.replace("rgb", "depth"), fname))
-        # Replace 'color' -> 'depth'
         if "color" in dirname:
             candidates.append(os.path.join(dirname.replace("color", "depth"), fname))
 
@@ -153,11 +116,11 @@ class BiwiHeadPoseRGBDDataset(Dataset):
         rgb_path = self._resolve_path(rgb_path_rel)
         mask_path = self._resolve_path(mask_path_rel)
 
-        # RGB
+        # RGB (original resolution, for visualization)
         rgb = Image.open(rgb_path).convert("RGB")
         rgb_np = np.array(rgb)  # H,W,3
 
-        # Depth (optional)
+        # Depth (optional, same shape as rgb_np if available)
         depth_path = self._infer_depth_path(rgb_path)
         if depth_path and os.path.isfile(depth_path):
             depth = Image.open(depth_path)
@@ -165,12 +128,11 @@ class BiwiHeadPoseRGBDDataset(Dataset):
         else:
             depth_np = np.zeros(rgb_np.shape[:2], dtype=np.float32)
 
-        # Mask
+        # Mask (grayscale)
         mask = Image.open(mask_path).convert("L")
         mask_np = np.array(mask)
 
-        # --- Build 4-channel input [RGBD] for the model ---
-        # Resize RGB and depth to 224x224
+        # --- Build 4-channel input [RGBD] for the model (224x224) ---
         rgb_resized = rgb.resize((224, 224), Image.BILINEAR)
         rgb_arr = np.array(rgb_resized).astype(np.float32) / 255.0  # H,W,3
 
@@ -208,7 +170,7 @@ class BiwiHeadPoseRGBDDataset(Dataset):
 
 
 # -----------------------------
-# Model (matching training checkpoint: vit + reg_head, 4ch, fc_norm)
+# Model (matching training ckpt)
 # -----------------------------
 class ViTHeadPoseModel(nn.Module):
     """
@@ -225,7 +187,7 @@ class ViTHeadPoseModel(nn.Module):
         super().__init__()
         # num_classes=0 => output features instead of logits
         # in_chans=4 => RGBD
-        # global_pool='avg' => uses fc_norm instead of norm
+        # global_pool="avg" => uses fc_norm instead of norm
         self.vit = timm.create_model(
             model_name,
             pretrained=False,
@@ -283,7 +245,7 @@ def draw_head_pose_arrow(ax, img, yaw_deg, pitch_deg, color="lime", label=""):
             fontsize=8,
             ha="center",
             va="bottom",
-            bbox=dict(facecolor="black", alpha=0.4, edgecolor="none")
+            bbox=dict(facecolor="black", alpha=0.4, edgecolor="none"),
         )
 
 
@@ -343,7 +305,8 @@ def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
         os.path.basename(meta.get("mask_path", "")),
     ]
     ax.text(
-        0.0, 1.0,
+        0.0,
+        1.0,
         "\n".join(text_lines),
         transform=ax.transAxes,
         fontsize=9,
@@ -357,8 +320,8 @@ def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
     labels = ["yaw", "pitch", "roll"]
     x = np.arange(len(labels))
     width = 0.35
-    ax.bar(x - width/2, gt, width, label="GT")
-    ax.bar(x + width/2, pred, width, label="Pred")
+    ax.bar(x - width / 2, gt, width, label="GT")
+    ax.bar(x + width / 2, pred, width, label="Pred")
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
     ax.set_ylabel("Degrees")
@@ -378,26 +341,98 @@ def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
 
 
 # -----------------------------
+# Custom collate (clave para evitar el error)
+# -----------------------------
+def custom_collate_fn(batch):
+    """
+    batch: list of tuples
+      (rgbd_t, angles_t, rgb_np, depth_np, mask_np, meta)
+
+    - Stack only the tensors we need for the model (rgbd_t, angles_t).
+    - Keep rgb_np, depth_np, mask_np as lists of numpy arrays.
+    - meta as dict of lists.
+    """
+    rgbd_list, angles_list, rgb_np_list, depth_np_list, mask_np_list, meta_list = zip(*batch)
+
+    rgbd_batch = torch.stack(rgbd_list, dim=0)      # [B,4,224,224]
+    angles_batch = torch.stack(angles_list, dim=0)  # [B,3]
+
+    # meta: dict with keys -> list of values
+    meta_batch = {}
+    for key in meta_list[0].keys():
+        meta_batch[key] = [m[key] for m in meta_list]
+
+    return (
+        rgbd_batch,
+        angles_batch,
+        list(rgb_np_list),
+        list(depth_np_list),
+        list(mask_np_list),
+        meta_batch,
+    )
+
+
+# -----------------------------
+# Argumentos
+# -----------------------------
+def parse_args():
+    p = argparse.ArgumentParser(
+        description="Evaluate ViT-B/16 RGBD on BIWI and generate PDF reports."
+    )
+    p.add_argument(
+        "--val-manifest",
+        type=str,
+        required=True,
+        help="CSV file for validation split (with image_path, yaw, pitch, roll, mask_path, ...).",
+    )
+    p.add_argument(
+        "--data-root",
+        type=str,
+        required=True,
+        help="Root directory for BIWI data.",
+    )
+    p.add_argument(
+        "--checkpoint",
+        type=str,
+        required=True,
+        help="Path to trained model checkpoint.",
+    )
+    p.add_argument("--model-name", type=str, default="vit_base_patch16_224")
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--output-dir", type=str, default="./biwi_eval_pdfs")
+    p.add_argument(
+        "--num-pdfs",
+        type=int,
+        default=5,
+        help="Number of best validation samples to export as PDF.",
+    )
+    p.add_argument("--cpu", action="store_true", help="Force CPU.")
+    return p.parse_args()
+
+
+# -----------------------------
 # Evaluation
 # -----------------------------
 def evaluate_and_generate_pdfs(args):
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
 
+    # Dataset + loader with custom collate
     val_ds = BiwiHeadPoseRGBDDataset(
         csv_path=args.val_manifest,
-        data_root=args.data_root
+        data_root=args.data_root,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=True
+        pin_memory=True,
+        collate_fn=custom_collate_fn,
     )
 
-    model = ViTHeadPoseModel(
-        model_name=args.model_name,
-    ).to(device)
+    # Model
+    model = ViTHeadPoseModel(model_name=args.model_name).to(device)
 
     ckpt = torch.load(args.checkpoint, map_location=device)
     state_dict = ckpt.get("model", ckpt)
@@ -409,7 +444,7 @@ def evaluate_and_generate_pdfs(args):
     count = 0
 
     with torch.no_grad():
-        for rgbd_t, angles_t, rgb_np, depth_np, mask_np, meta in val_loader:
+        for rgbd_t, angles_t, rgb_np_list, depth_np_list, mask_np_list, meta in val_loader:
             rgbd_t = rgbd_t.to(device)      # [B,4,224,224]
             angles_t = angles_t.to(device)  # [B,3]
 
@@ -421,25 +456,29 @@ def evaluate_and_generate_pdfs(args):
             mae_sum += abs_err.sum(axis=0)
             count += abs_err.shape[0]
 
-            for i in range(abs_err.shape[0]):
+            batch_size = abs_err.shape[0]
+            for i in range(batch_size):
                 mae_per_axis = abs_err[i]
                 mae_mean = float(mae_per_axis.mean())
 
-                all_samples.append({
-                    "rgb_np": rgb_np[i].numpy(),
-                    "depth_np": depth_np[i].numpy(),
-                    "mask_np": mask_np[i].numpy(),
-                    "gt_angles": gt_np[i],
-                    "pred_angles": pred_np[i],
-                    "mae_per_axis": mae_per_axis,
-                    "mae_mean": mae_mean,
-                    "meta": {k: meta[k][i] for k in meta},
-                })
+                all_samples.append(
+                    {
+                        "rgb_np": rgb_np_list[i],
+                        "depth_np": depth_np_list[i],
+                        "mask_np": mask_np_list[i],
+                        "gt_angles": gt_np[i],
+                        "pred_angles": pred_np[i],
+                        "mae_per_axis": mae_per_axis,
+                        "mae_mean": mae_mean,
+                        "meta": {k: meta[k][i] for k in meta},
+                    }
+                )
 
     overall_mae = mae_sum / max(1, count)
     print(f"[INFO] Global MAE (yaw, pitch, roll): {overall_mae}")
     print(f"[INFO] Mean MAE: {overall_mae.mean():.3f} deg")
 
+    # Ordenar por MAE medio (menor primero)
     all_samples.sort(key=lambda d: d["mae_mean"])
 
     k = min(args.num_pdfs, len(all_samples))
@@ -447,29 +486,6 @@ def evaluate_and_generate_pdfs(args):
 
     for rank in range(k):
         save_sample_pdf(all_samples[rank], args.output_dir, rank)
-
-
-# -----------------------------
-# Argparse
-# -----------------------------
-def parse_args():
-    p = argparse.ArgumentParser(
-        description="Evaluate ViT-B/16 RGBD on BIWI and generate PDF reports."
-    )
-    p.add_argument("--val-manifest", type=str, required=True,
-                   help="CSV file for validation split (with image_path, yaw, pitch, roll, mask_path, ...).")
-    p.add_argument("--data-root", type=str, required=True,
-                   help="Root directory for BIWI data.")
-    p.add_argument("--checkpoint", type=str, required=True,
-                   help="Path to trained model checkpoint.")
-    p.add_argument("--model-name", type=str, default="vit_base_patch16_224")
-    p.add_argument("--batch-size", type=int, default=32)
-    p.add_argument("--num-workers", type=int, default=4)
-    p.add_argument("--output-dir", type=str, default="./biwi_eval_pdfs")
-    p.add_argument("--num-pdfs", type=int, default=5,
-                   help="Number of best validation samples to export as PDF.")
-    p.add_argument("--cpu", action="store_true", help="Force CPU.")
-    return p.parse_args()
 
 
 def main():
