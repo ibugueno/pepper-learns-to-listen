@@ -103,7 +103,7 @@ class BiwiHeadPoseRGBDDataset(Dataset):
         raise FileNotFoundError(
             f"Cannot resolve path '{p}' under data_root '{self.data_root}'"
         )
-l
+
 
     def _infer_depth_path(self, rgb_path: str) -> str:
         """
