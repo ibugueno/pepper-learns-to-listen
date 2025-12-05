@@ -105,73 +105,56 @@ class BiwiHeadPoseRGBDDataset(Dataset):
         )
 
 
-    def _infer_depth_path(self, rgb_path: str) -> str:
-        """
-        Try to infer a plausible depth path from the RGB path.
-        Adapted to your biwi-kinect-head crops layout.
-        Assumes something like:
-          .../rgb_crops_yolo/.../frame_00197_rgb.png
-          .../depth_crops_yolo/.../frame_00197_depth.png
-        """
-        candidates = []
-        dirname, fname = os.path.split(rgb_path)
-
-        # Caso principal: rgb_crops_yolo -> depth_crops_yolo
-        if "rgb_crops_yolo" in dirname:
-            candidates.append(
-                os.path.join(
-                    dirname.replace("rgb_crops_yolo", "depth_crops_yolo"),
-                    fname.replace("_rgb.png", "_depth.png"),
-                )
-            )
-
-        # Backups más genéricos por si el layout es distinto
-        if "rgb" in dirname:
-            candidates.append(os.path.join(dirname.replace("rgb", "depth"), fname))
-        if "color" in dirname:
-            candidates.append(os.path.join(dirname.replace("color", "depth"), fname))
-
-        parent = os.path.dirname(dirname)
-        depth_dir = os.path.join(parent, "depth")
-        candidates.append(os.path.join(depth_dir, fname))
-
-        for c in candidates:
-            if os.path.isfile(c):
-                return c
-
-        # Si no encontramos nada, devolvemos string vacío
-        return ""
-
 
     def __len__(self):
         return len(self.samples)
 
+  
     def __getitem__(self, idx):
         row = self.samples[idx]
 
-        rgb_path_rel = row["image_path"]
-        mask_path_rel = row["mask_path"]
+        rgb_path  = self._resolve_path(row["image_path"])
+        mask_path = self._resolve_path(row["mask_path"])
 
-        rgb_path = self._resolve_path(rgb_path_rel)
-        mask_path = self._resolve_path(mask_path_rel)
-
-        # RGB (original resolution, for visualization)
+        # RGB crop (ya recortado por YOLO)
         rgb = Image.open(rgb_path).convert("RGB")
-        rgb_np = np.array(rgb)  # H,W,3
+        rgb_np = np.array(rgb)  # Hc,Wc,3
 
-        # Depth (optional, same shape as rgb_np if available)
-        depth_path = self._infer_depth_path(rgb_path)
-        if depth_path and os.path.isfile(depth_path):
-            depth = Image.open(depth_path)
-            depth_np = np.array(depth)
-        else:
-            depth_np = np.zeros(rgb_np.shape[:2], dtype=np.float32)
-
-        # Mask (grayscale)
+        # Mask crop (solo para visualizar, no para depth)
         mask = Image.open(mask_path).convert("L")
         mask_np = np.array(mask)
 
-        # --- Build 4-channel input [RGBD] for the model (224x224) ---
+        # --- Depth FULL FRAME desde faces_0 ---
+        depth_path_full = self._get_depth_path_from_row(row)
+        depth_full = self._load_depth_bin(depth_path_full)   # H,W
+
+        H, W = depth_full.shape
+
+        # Bounding box EN COORDENADAS DEL FRAME ORIGINAL
+        xmin = int(float(row.get("bbox_xmin", 0)))
+        ymin = int(float(row.get("bbox_ymin", 0)))
+        xmax = int(float(row.get("bbox_xmax", W)))
+        ymax = int(float(row.get("bbox_ymax", H)))
+
+        # Clamp por seguridad
+        xmin = max(0, min(xmin, W - 1))
+        xmax = max(0, min(xmax, W))
+        ymin = max(0, min(ymin, H - 1))
+        ymax = max(0, min(ymax, H))
+
+        if xmax <= xmin or ymax <= ymin:
+            raise ValueError(
+                f"Invalid bbox for idx={idx}: "
+                f"({xmin},{ymin})-({xmax},{ymax}) on depth {W}x{H}"
+            )
+
+        # Recorte de depth con el bbox
+        depth_crop = depth_full[ymin:ymax, xmin:xmax]   # Hd,Wd
+
+        # Guardamos ese crop para visualizar
+        depth_np = depth_crop
+
+        # --- Build 4-channel input [RGBD] (224x224) ---
         rgb_resized = rgb.resize((224, 224), Image.BILINEAR)
         rgb_arr = np.array(rgb_resized).astype(np.float32) / 255.0  # H,W,3
 
@@ -179,14 +162,11 @@ class BiwiHeadPoseRGBDDataset(Dataset):
         depth_resized = depth_img.resize((224, 224), Image.NEAREST)
         depth_arr = np.array(depth_resized).astype(np.float32)
 
-        # Normalize depth to [0,1] if possible (avoid div by zero)
         if depth_arr.max() > 0:
             depth_arr = depth_arr / depth_arr.max()
         depth_arr = depth_arr[..., None]  # H,W,1
 
-        # Concatenate → H,W,4
         rgbd_arr = np.concatenate([rgb_arr, depth_arr], axis=-1)
-        # To tensor C,H,W
         rgbd_t = torch.from_numpy(rgbd_arr).permute(2, 0, 1)  # [4,224,224]
 
         # Angles
@@ -196,7 +176,7 @@ class BiwiHeadPoseRGBDDataset(Dataset):
         angles = torch.tensor([yaw, pitch, roll], dtype=torch.float32)
 
         meta = {
-            "rgb_path": rgb_path,
+            "rgb_path":  rgb_path,
             "mask_path": mask_path,
             "yaw": yaw,
             "pitch": pitch,
@@ -206,6 +186,54 @@ class BiwiHeadPoseRGBDDataset(Dataset):
         }
 
         return rgbd_t, angles, rgb_np, depth_np, mask_np, meta
+
+  
+
+    def _get_depth_path_from_row(self, row: Dict) -> str:
+        """
+        Construye la ruta al depth .bin original usando subject y frame_id,
+        por ejemplo:
+          data_root/faces_0/10/frame_00388_depth.bin
+        """
+        subject = str(row.get("subject", "")).strip()
+        frame_id = str(row.get("frame_id", "")).strip()  # p.ej. "frame_00388"
+
+        if subject and frame_id:
+            cand = os.path.join(
+                self.data_root,
+                "faces_0",
+                subject,
+                f"{frame_id}_depth.bin",
+            )
+            if os.path.isfile(cand):
+                return cand
+
+        # Fallback: si falla, seguimos con la heurística anterior
+        rgb_path = self._resolve_path(row["image_path"])
+        return self._infer_depth_path(rgb_path)
+
+    def _load_depth_bin(self, depth_path: str) -> np.ndarray:
+        """
+        Lee el depth .bin original de BIWI y lo devuelve como imagen 2D.
+        Intenta primero float32, si no cuadra prueba uint16.
+        """
+        # Intento 1: float32
+        raw = np.fromfile(depth_path, dtype=np.float32)
+        if raw.size == 640 * 480:
+            return raw.reshape(480, 640)
+        if raw.size == 320 * 240:
+            return raw.reshape(240, 320)
+
+        # Intento 2: uint16
+        raw = np.fromfile(depth_path, dtype=np.uint16)
+        if raw.size == 640 * 480:
+            return raw.reshape(480, 640).astype(np.float32)
+        if raw.size == 320 * 240:
+            return raw.reshape(240, 320).astype(np.float32)
+
+        raise ValueError(
+            f"Unexpected depth size in {depth_path}: {raw.size} elements"
+        )
 
 
 # -----------------------------
@@ -267,7 +295,7 @@ def draw_head_pose_arrow(ax, img, yaw_deg, pitch_deg, color="lime", label=""):
     dy = -np.sin(pitch)
 
     # Flecha más larga
-    length = min(h, w) * 0.5
+    length = min(h, w) * 1
     x2 = cx + dx * length
     y2 = cy + dy * length
 
