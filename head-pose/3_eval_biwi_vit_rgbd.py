@@ -103,7 +103,7 @@ class BiwiHeadPoseRGBDDataset(Dataset):
         raise FileNotFoundError(
             f"Cannot resolve path '{p}' under data_root '{self.data_root}'"
         )
-
+l
 
     def _infer_depth_path(self, rgb_path: str) -> str:
         """
@@ -285,94 +285,64 @@ def draw_head_pose_arrow(ax, img, yaw_deg, pitch_deg, color="lime", label=""):
 
 
 def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
+    """
+    Produce un PDF con 5 imágenes:
+      1) RGB original
+      2) Depth
+      3) Mask
+      4) RGB con pose predicha
+      5) RGB con pose GT
+    """
     os.makedirs(out_dir, exist_ok=True)
+
     rgb = sample["rgb_np"]
     depth = sample["depth_np"]
     mask = sample["mask_np"]
-    gt = sample["gt_angles"]
-    pred = sample["pred_angles"]
-    mae = sample["mae_per_axis"]
-    mae_mean = sample["mae_mean"]
-    meta = sample["meta"]
+    gt = sample["gt_angles"]       # yaw, pitch, roll
+    pred = sample["pred_angles"]   # yaw, pitch, roll
 
-    fig, axes = plt.subplots(2, 3, figsize=(11, 7))
-    fig.suptitle(f"BIWI Head Pose – Best validation sample #{rank+1}", fontsize=14)
+    # -------- Precompute images --------
+    # Copias para dibujar flechas
+    rgb_pred = rgb.copy()
+    rgb_gt   = rgb.copy()
 
-    # RGB + pose arrows
-    ax = axes[0, 0]
-    ax.imshow(rgb)
-    ax.set_title("RGB image")
-    ax.axis("off")
-    draw_head_pose_arrow(ax, rgb, gt[0], gt[1], color="lime", label="GT")
-    draw_head_pose_arrow(ax, rgb, pred[0], pred[1], color="red", label="Pred")
+    # DIBUJAR flechas (usa tu función existente)
+    fig_tmp, ax_tmp = plt.subplots()
+    ax_tmp.imshow(rgb_pred)
+    draw_head_pose_arrow(ax_tmp, rgb_pred, pred[0], pred[1], color="red")
+    plt.close(fig_tmp)
 
-    # Depth
-    ax = axes[0, 1]
-    ax.imshow(depth, cmap="viridis")
-    ax.set_title("Depth image")
-    ax.axis("off")
+    fig_tmp, ax_tmp = plt.subplots()
+    ax_tmp.imshow(rgb_gt)
+    draw_head_pose_arrow(ax_tmp, rgb_gt, gt[0], gt[1], color="lime")
+    plt.close(fig_tmp)
 
-    # Mask
-    ax = axes[0, 2]
-    ax.imshow(mask, cmap="gray")
-    ax.set_title("Mask image")
-    ax.axis("off")
+    # -------- Final layout: 5 imágenes --------
+    fig, axes = plt.subplots(1, 5, figsize=(25, 5))
 
-    # Text with metrics
-    ax = axes[1, 0]
-    ax.axis("off")
-
-    text_lines = [
-        "Head pose (degrees)",
-        "",
-        f"GT yaw / pitch / roll: {gt[0]:.2f} / {gt[1]:.2f} / {gt[2]:.2f}",
-        f"Pred yaw / pitch / roll: {pred[0]:.2f} / {pred[1]:.2f} / {pred[2]:.2f}",
-        "",
-        "Absolute error (degrees)",
-        f"yaw:   {mae[0]:.2f}",
-        f"pitch: {mae[1]:.2f}",
-        f"roll:  {mae[2]:.2f}",
-        "",
-        f"Mean MAE: {mae_mean:.2f} deg",
-        "",
-        "Paths:",
-        os.path.basename(meta.get("rgb_path", "")),
-        os.path.basename(meta.get("mask_path", "")),
+    panels = [
+        (rgb, "RGB"),
+        (depth, "Depth"),
+        (mask, "Mask"),
+        (rgb_pred, "Pred Pose"),
+        (rgb_gt, "GT Pose"),
     ]
-    ax.text(
-        0.0,
-        1.0,
-        "\n".join(text_lines),
-        transform=ax.transAxes,
-        fontsize=9,
-        va="top",
-        ha="left",
-    )
 
-    # GT vs Pred bar plot
-    ax = axes[1, 1]
-    ax.set_title("GT vs Pred angles")
-    labels = ["yaw", "pitch", "roll"]
-    x = np.arange(len(labels))
-    width = 0.35
-    ax.bar(x - width / 2, gt, width, label="GT")
-    ax.bar(x + width / 2, pred, width, label="Pred")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels)
-    ax.set_ylabel("Degrees")
-    ax.legend()
+    for ax, (img, title) in zip(axes, panels):
+        if img.ndim == 2:
+            ax.imshow(img, cmap="gray")
+        else:
+            ax.imshow(img)
+        ax.axis("off")
+        ax.set_title(title)
 
-    # Error per axis
-    ax = axes[1, 2]
-    ax.set_title("Absolute error per axis")
-    ax.bar(labels, mae)
-    ax.set_ylabel("Degrees")
-
-    pdf_name = os.path.join(out_dir, f"biwi_best_sample_{rank+1:02d}.pdf")
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig(pdf_name, format="pdf", bbox_inches="tight")
+    pdf_path = os.path.join(out_dir, f"sample_{rank+1:02d}.pdf")
+    plt.tight_layout()
+    plt.savefig(pdf_path, format="pdf", bbox_inches="tight")
     plt.close(fig)
-    print(f"[INFO] Saved {pdf_name}")
+
+    print(f"[INFO] Saved PDF → {pdf_path}")
+
 
 
 # -----------------------------
