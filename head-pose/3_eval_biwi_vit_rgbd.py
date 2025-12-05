@@ -248,47 +248,44 @@ class ViTHeadPoseModel(nn.Module):
 # -----------------------------
 # Visualization utilities
 # -----------------------------
-def draw_head_orientation_arrow(ax, img, yaw_deg, pitch_deg, color="red", scale=0.8):
+def draw_head_pose_arrow(ax, img, yaw_deg, pitch_deg, color="lime", label=""):
     """
-    Draw a single 2D arrow showing the head orientation direction.
-    Uses yaw (left/right) and pitch (up/down).
-
-    This is NOT a full 3D projection — it is a clean 2D visualization
-    that matches intuitive head direction for qualitative inspection.
-
-    color: "red" for predicted, "lime" for GT
+    Draw a simple 2D arrow on the image to represent head pose direction.
+    Qualitative only.
     """
     h, w = img.shape[:2]
-    cx, cy = w // 2, h // 2     # arrow starts at face center
+    cx, cy = w // 2, h // 2
 
-    # Convert to radians
-    yaw   = np.deg2rad(yaw_deg)
+    yaw = np.deg2rad(yaw_deg)
     pitch = np.deg2rad(pitch_deg)
 
-    # --- Define arrow direction ---
-    # yaw   > 0 → persona mira hacia SU izquierda → flecha hacia la izquierda en imagen
-    # pitch > 0 → persona mira hacia ARRIBA → flecha hacia arriba
-    #
-    # Ajustes simples y estables:
-    dx = -np.sin(yaw) * np.cos(pitch)
+    dx = np.sin(yaw) * np.cos(pitch)
     dy = -np.sin(pitch)
 
-    # Make arrow longer
-    L = min(h, w) * scale
-    x2 = cx + dx * L
-    y2 = cy + dy * L
+    length = min(h, w) * 0.5
+    x2 = cx + dx * length
+    y2 = cy + dy * length
 
     ax.arrow(
         cx, cy,
         x2 - cx, y2 - cy,
-        head_width=h * 0.04,
-        head_length=h * 0.06,
+        head_width=h * 0.02,
+        head_length=h * 0.03,
         length_includes_head=True,
         color=color,
-        linewidth=4,
-        alpha=0.95,
+        linewidth=2,
+        alpha=0.9,
     )
-
+    if label:
+        ax.text(
+            cx, cy,
+            label,
+            color=color,
+            fontsize=8,
+            ha="center",
+            va="bottom",
+            bbox=dict(facecolor="black", alpha=0.4, edgecolor="none"),
+        )
 
 
 def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
@@ -316,14 +313,12 @@ def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
     # DIBUJAR flechas (usa tu función existente)
     fig_tmp, ax_tmp = plt.subplots()
     ax_tmp.imshow(rgb_pred)
-    draw_head_orientation_arrow(ax, rgb, pred[0], pred[1], color="red")
-
+    draw_head_pose_arrow(ax_tmp, rgb_pred, pred[0], pred[1], color="red")
     plt.close(fig_tmp)
 
     fig_tmp, ax_tmp = plt.subplots()
     ax_tmp.imshow(rgb_gt)
-    draw_head_orientation_arrow(ax, rgb, gt[0], gt[1], color="lime")
-
+    draw_head_pose_arrow(ax_tmp, rgb_gt, gt[0], gt[1], color="lime")
     plt.close(fig_tmp)
 
     # -------- Final layout: 5 imágenes --------
