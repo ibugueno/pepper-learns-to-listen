@@ -368,7 +368,7 @@ def draw_head_pose_arrow(ax, img, yaw_deg, pitch_deg, color="lime", label=""):
     dy = -np.sin(pitch)
 
     # Flecha más larga
-    length = min(h, w) * 1
+    length = min(h, w) * 0.5
     x2 = cx + dx * length
     y2 = cy + dy * length
 
