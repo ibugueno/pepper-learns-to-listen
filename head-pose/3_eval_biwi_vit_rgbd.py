@@ -248,44 +248,84 @@ class ViTHeadPoseModel(nn.Module):
 # -----------------------------
 # Visualization utilities
 # -----------------------------
-def draw_head_pose_arrow(ax, img, yaw_deg, pitch_deg, color="lime", label=""):
+
+def draw_head_pose_axes(ax, img, yaw_deg, pitch_deg, roll_deg, scale=0.75):
     """
-    Draw a simple 2D arrow on the image to represent head pose direction.
-    Qualitative only.
+    Draw a simple 3D head-pose coordinate frame on top of the image.
+
+    - X axis: red
+    - Y axis: green
+    - Z axis: blue
+
+    Yaw, pitch, roll are in degrees (BIWI convention, approx).
+    The axes are drawn from the center of the image.
     """
     h, w = img.shape[:2]
     cx, cy = w // 2, h // 2
 
+    # Convert to radians
     yaw = np.deg2rad(yaw_deg)
     pitch = np.deg2rad(pitch_deg)
+    roll = np.deg2rad(roll_deg)
 
-    dx = np.sin(yaw) * np.cos(pitch)
-    dy = -np.sin(pitch)
+    # Rotation matrices (approximate convention)
+    # Yaw   -> rotation around Y axis
+    # Pitch -> rotation around X axis
+    # Roll  -> rotation around Z axis
+    R_y = np.array([
+        [ np.cos(yaw), 0, np.sin(yaw)],
+        [ 0,           1,          0],
+        [-np.sin(yaw), 0, np.cos(yaw)],
+    ])
 
-    length = min(h, w) * 0.25
-    x2 = cx + dx * length
-    y2 = cy + dy * length
+    R_x = np.array([
+        [1,           0,            0],
+        [0, np.cos(pitch), -np.sin(pitch)],
+        [0, np.sin(pitch),  np.cos(pitch)],
+    ])
 
-    ax.arrow(
-        cx, cy,
-        x2 - cx, y2 - cy,
-        head_width=h * 0.02,
-        head_length=h * 0.03,
-        length_includes_head=True,
-        color=color,
-        linewidth=2,
-        alpha=0.9,
-    )
-    if label:
-        ax.text(
+    R_z = np.array([
+        [np.cos(roll), -np.sin(roll), 0],
+        [np.sin(roll),  np.cos(roll), 0],
+        [0,                      0,   1],
+    ])
+
+    # Total rotation (order approx: roll * yaw * pitch)
+    R = R_z @ R_y @ R_x
+
+    # Canonical axes in head coordinates
+    x_axis = np.array([1., 0., 0.])  # right
+    y_axis = np.array([0., 1., 0.])  # down
+    z_axis = np.array([0., 0., 1.])  # out of the face
+
+    # Rotate
+    x_rot = R @ x_axis
+    y_rot = R @ y_axis
+    z_rot = R @ z_axis
+
+    # Length of the arrows (3x más grande que antes: 0.75 vs 0.25)
+    base_len = min(h, w) * scale
+
+    def _draw_arrow(dir_vec, color):
+        dx3, dy3, dz3 = dir_vec
+        # Proyección muy simple: usamos x,y y cambiamos el signo de y para coords de imagen
+        x2 = cx + dx3 * base_len
+        y2 = cy - dy3 * base_len
+        ax.arrow(
             cx, cy,
-            label,
+            x2 - cx, y2 - cy,
+            head_width=h * 0.06,   # más gordo
+            head_length=h * 0.09,  # más largo
+            length_includes_head=True,
             color=color,
-            fontsize=8,
-            ha="center",
-            va="bottom",
-            bbox=dict(facecolor="black", alpha=0.4, edgecolor="none"),
+            linewidth=3,
+            alpha=0.9,
         )
+
+    # X (rojo), Y (verde), Z (azul)
+    _draw_arrow(x_rot, "red")
+    _draw_arrow(y_rot, "green")
+    _draw_arrow(z_rot, "blue")
 
 
 def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
@@ -294,8 +334,8 @@ def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
       1) RGB original
       2) Depth
       3) Mask
-      4) RGB con pose predicha (flecha roja)
-      5) RGB con pose GT (flecha verde)
+      4) RGB con sistema de coordenadas de pose predicha
+      5) RGB con sistema de coordenadas de pose GT
     """
     os.makedirs(out_dir, exist_ok=True)
 
@@ -328,19 +368,19 @@ def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
     ax.axis("off")
     ax.set_title("Mask")
 
-    # 4) RGB con pose predicha
+    # 4) RGB con pose predicha (ejes)
     ax = axes[3]
     ax.imshow(rgb)
     ax.axis("off")
     ax.set_title("Pred Pose")
-    draw_head_pose_arrow(ax, rgb, pred[0], pred[1], color="red")
+    draw_head_pose_axes(ax, rgb, pred[0], pred[1], pred[2])
 
-    # 5) RGB con pose GT
+    # 5) RGB con pose GT (ejes)
     ax = axes[4]
     ax.imshow(rgb)
     ax.axis("off")
     ax.set_title("GT Pose")
-    draw_head_pose_arrow(ax, rgb, gt[0], gt[1], color="lime")
+    draw_head_pose_axes(ax, rgb, gt[0], gt[1], gt[2])
 
     pdf_path = os.path.join(out_dir, f"sample_{rank+1:02d}.pdf")
     plt.tight_layout()
