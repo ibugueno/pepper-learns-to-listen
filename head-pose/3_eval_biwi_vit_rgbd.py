@@ -109,26 +109,28 @@ class BiwiHeadPoseRGBDDataset(Dataset):
         """
         Try to infer a plausible depth path from the RGB path.
         Adapted to your biwi-kinect-head crops layout.
+        Assumes something like:
+          .../rgb_crops_yolo/.../frame_00197_rgb.png
+          .../depth_crops_yolo/.../frame_00197_depth.png
         """
         candidates = []
         dirname, fname = os.path.split(rgb_path)
 
-        # Replace 'rgb_crops_yolo' -> 'mask_crops_yolo'
+        # Caso principal: rgb_crops_yolo -> depth_crops_yolo
         if "rgb_crops_yolo" in dirname:
             candidates.append(
                 os.path.join(
-                    dirname.replace("rgb_crops_yolo", "mask_crops_yolo"),
-                    fname.replace("_rgb.png", "_mask.png"),
+                    dirname.replace("rgb_crops_yolo", "depth_crops_yolo"),
+                    fname.replace("_rgb.png", "_depth.png"),
                 )
             )
 
-        # Replace generic 'rgb' -> 'depth'
+        # Backups más genéricos por si el layout es distinto
         if "rgb" in dirname:
             candidates.append(os.path.join(dirname.replace("rgb", "depth"), fname))
         if "color" in dirname:
             candidates.append(os.path.join(dirname.replace("color", "depth"), fname))
 
-        # Parent/depth/fname
         parent = os.path.dirname(dirname)
         depth_dir = os.path.join(parent, "depth")
         candidates.append(os.path.join(depth_dir, fname))
@@ -137,7 +139,9 @@ class BiwiHeadPoseRGBDDataset(Dataset):
             if os.path.isfile(c):
                 return c
 
+        # Si no encontramos nada, devolvemos string vacío
         return ""
+
 
     def __len__(self):
         return len(self.samples)
@@ -290,51 +294,53 @@ def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
       1) RGB original
       2) Depth
       3) Mask
-      4) RGB con pose predicha
-      5) RGB con pose GT
+      4) RGB con pose predicha (flecha roja)
+      5) RGB con pose GT (flecha verde)
     """
     os.makedirs(out_dir, exist_ok=True)
 
-    rgb = sample["rgb_np"]
+    rgb   = sample["rgb_np"]
     depth = sample["depth_np"]
-    mask = sample["mask_np"]
-    gt = sample["gt_angles"]       # yaw, pitch, roll
-    pred = sample["pred_angles"]   # yaw, pitch, roll
+    mask  = sample["mask_np"]
+    gt    = sample["gt_angles"]       # [yaw, pitch, roll]
+    pred  = sample["pred_angles"]     # [yaw, pitch, roll]
 
-    # -------- Precompute images --------
-    # Copias para dibujar flechas
-    rgb_pred = rgb.copy()
-    rgb_gt   = rgb.copy()
+    fig, axes = plt.subplots(1, 5, figsize=(20, 4))
 
-    # DIBUJAR flechas (usa tu función existente)
-    fig_tmp, ax_tmp = plt.subplots()
-    ax_tmp.imshow(rgb_pred)
-    draw_head_pose_arrow(ax_tmp, rgb_pred, pred[0], pred[1], color="red")
-    plt.close(fig_tmp)
+    # 1) RGB original
+    ax = axes[0]
+    ax.imshow(rgb)
+    ax.axis("off")
+    ax.set_title("RGB")
 
-    fig_tmp, ax_tmp = plt.subplots()
-    ax_tmp.imshow(rgb_gt)
-    draw_head_pose_arrow(ax_tmp, rgb_gt, gt[0], gt[1], color="lime")
-    plt.close(fig_tmp)
+    # 2) Depth
+    ax = axes[1]
+    if depth.ndim == 2:
+        ax.imshow(depth, cmap="viridis")
+    else:
+        ax.imshow(depth)
+    ax.axis("off")
+    ax.set_title("Depth")
 
-    # -------- Final layout: 5 imágenes --------
-    fig, axes = plt.subplots(1, 5, figsize=(25, 5))
+    # 3) Mask
+    ax = axes[2]
+    ax.imshow(mask, cmap="gray")
+    ax.axis("off")
+    ax.set_title("Mask")
 
-    panels = [
-        (rgb, "RGB"),
-        (depth, "Depth"),
-        (mask, "Mask"),
-        (rgb_pred, "Pred Pose"),
-        (rgb_gt, "GT Pose"),
-    ]
+    # 4) RGB con pose predicha
+    ax = axes[3]
+    ax.imshow(rgb)
+    ax.axis("off")
+    ax.set_title("Pred Pose")
+    draw_head_pose_arrow(ax, rgb, pred[0], pred[1], color="red")
 
-    for ax, (img, title) in zip(axes, panels):
-        if img.ndim == 2:
-            ax.imshow(img, cmap="gray")
-        else:
-            ax.imshow(img)
-        ax.axis("off")
-        ax.set_title(title)
+    # 5) RGB con pose GT
+    ax = axes[4]
+    ax.imshow(rgb)
+    ax.axis("off")
+    ax.set_title("GT Pose")
+    draw_head_pose_arrow(ax, rgb, gt[0], gt[1], color="lime")
 
     pdf_path = os.path.join(out_dir, f"sample_{rank+1:02d}.pdf")
     plt.tight_layout()
@@ -342,6 +348,7 @@ def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
     plt.close(fig)
 
     print(f"[INFO] Saved PDF → {pdf_path}")
+
 
 
 
