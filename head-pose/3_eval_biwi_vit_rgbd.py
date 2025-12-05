@@ -27,6 +27,8 @@ from torch.utils.data import Dataset, DataLoader
 import timm
 import matplotlib.pyplot as plt
 
+import struct
+import numpy as np
 
 
 # -----------------------------
@@ -158,28 +160,63 @@ class BiwiHeadPoseRGBDDataset(Dataset):
         rgb_path = self._resolve_path(row["image_path"])
         return self._infer_depth_path(rgb_path)
 
-
     def _load_depth_bin(self, depth_path: str) -> np.ndarray:
         """
-        Lee el depth .bin original de BIWI y lo devuelve como imagen 2D (float32).
+        Lee el depth .bin comprimido de BIWI y lo devuelve como imagen 2D (float32).
+        Implementa en Python el loadDepthImageCompressed de los autores.
         """
-        # Intento 1: float32
-        raw = np.fromfile(depth_path, dtype=np.float32)
-        if raw.size == 640 * 480:
-            return raw.reshape(480, 640)
-        if raw.size == 320 * 240:
-            return raw.reshape(240, 320)
+        with open(depth_path, "rb") as f:
+            # Leer width y height (2 int de 4 bytes, little-endian)
+            header = f.read(8)
+            if len(header) != 8:
+                raise ValueError(f"Cannot read width/height from {depth_path}")
+            im_width, im_height = struct.unpack("ii", header)  # nativo (little-endian)
 
-        # Intento 2: uint16
-        raw = np.fromfile(depth_path, dtype=np.uint16)
-        if raw.size == 640 * 480:
-            return raw.reshape(480, 640).astype(np.float32)
-        if raw.size == 320 * 240:
-            return raw.reshape(240, 320).astype(np.float32)
+            num_pixels = im_width * im_height
+            depth_flat = np.zeros(num_pixels, dtype=np.int16)
 
-        raise ValueError(
-            f"Unexpected depth size in {depth_path}: {raw.size} elements"
-        )
+            p = 0
+            while p < num_pixels:
+                # numempty
+                buf = f.read(4)
+                if len(buf) != 4:
+                    raise ValueError(f"Cannot read numempty from {depth_path} at p={p}")
+                (numempty,) = struct.unpack("i", buf)
+
+                # rellenar ceros
+                if numempty > 0:
+                    end_zero = min(p + numempty, num_pixels)
+                    depth_flat[p:end_zero] = 0
+                else:
+                    end_zero = p
+
+                # numfull
+                buf = f.read(4)
+                if len(buf) != 4:
+                    raise ValueError(f"Cannot read numfull from {depth_path} at p={p}")
+                (numfull,) = struct.unpack("i", buf)
+
+                # leer los valores int16 reales
+                if numfull > 0:
+                    bytes_to_read = numfull * 2
+                    buf = f.read(bytes_to_read)
+                    if len(buf) != bytes_to_read:
+                        raise ValueError(
+                            f"Cannot read depth values from {depth_path} at p={p}"
+                        )
+                    vals = np.frombuffer(buf, dtype=np.int16)
+                    start_full = end_zero
+                    end_full = min(start_full + numfull, num_pixels)
+                    depth_flat[start_full:end_full] = vals[: (end_full - start_full)]
+
+                # avanzar puntero global
+                p += numempty + numfull
+
+            # reshape a (H,W) y pasar a float32 (milímetros → opcionalmente metros)
+            depth_img = depth_flat.reshape(im_height, im_width).astype(np.float32)
+
+            return depth_img
+
 
     def __len__(self):
         return len(self.samples)
