@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
-# 3_eval_biwi_vit_rgbd.py
-# Evalúa un ViTRegressor entrenado (RGB+Depth) sobre un manifest CSV (e.g. val_yolo.csv)
+# 3_eval_biwi_vit_rgbd_pdfs.py
+#
+# Evaluate ViT-B/16 RGBD head pose model on BIWI and
+# generate 5 PDF (vector) reports for the most accurate
+# validation samples, showing:
+#   - RGB image
+#   - Depth image
+#   - Mask image
+#   - GT and predicted head pose drawn
+#   - Text with per-axis MAE and mean MAE
+#
+# Text is in English.
 
 import os
 import csv
 import json
 import argparse
-from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Dict
 
 import numpy as np
 from PIL import Image
@@ -16,382 +25,369 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
-import torchvision.transforms.functional as F
-from torchvision.transforms import InterpolationMode
-
 import timm
+import matplotlib.pyplot as plt
 
 
 # -----------------------------
-# Dataset (RGB + Depth) - mismo estilo que en el train
+# Dataset
 # -----------------------------
-@dataclass
-class Sample:
-    rgb_path: str
-    depth_path: str
-    yaw: float
-    pitch: float
-    roll: float
+class BiwiHeadPoseRGBDDataset(Dataset):
+    """
+    Simple BIWI RGBD dataset for evaluation.
 
+    Assumes the val CSV has at least the following columns:
+        rgb_path, depth_path, mask_path, yaw, pitch, roll
 
-class BiwiRGBDCSV(Dataset):
-    def __init__(
-        self,
-        manifest_path: str,
-        img_size: int,
-        data_root: Optional[str] = None,
-    ):
-        if not os.path.isfile(manifest_path):
-            raise FileNotFoundError(f"Manifest not found: {manifest_path}")
-
-        self.samples: List[Sample] = []
-        self.img_size = img_size
+    Paths are assumed to be either absolute or relative to --data-root.
+    Angles are in degrees (float).
+    """
+    def __init__(self, csv_path: str, data_root: str):
         self.data_root = data_root
+        self.samples = self._read_csv(csv_path)
 
-        with open(manifest_path, "r", newline="") as f:
+    def _read_csv(self, path: str) -> List[Dict]:
+        out = []
+        with open(path, "r", newline="") as f:
             reader = csv.DictReader(f)
-            fieldnames = set(reader.fieldnames or [])
-            req_cols = {"image_path", "yaw", "pitch", "roll"}
-            if not req_cols.issubset(fieldnames):
-                raise ValueError(
-                    f"Manifest must contain columns at least: {req_cols}. "
-                    f"Found: {reader.fieldnames}"
-                )
-
-            has_mask_col = "mask_path" in fieldnames
-
-            def rewrite_path(old_path: str) -> str:
-                if old_path is None:
-                    return None
-                if self.data_root is None:
-                    return old_path
-                old_prefix = "/media/ignacio/KINGSTON/biwi-kinect-head"
-                if old_path.startswith(old_prefix):
-                    suffix = old_path.split("biwi-kinect-head", 1)[1]
-                    return os.path.join(self.data_root, suffix.lstrip("/"))
-                return old_path
-
+            required = {"rgb_path", "depth_path", "mask_path", "yaw", "pitch", "roll"}
+            if not required.issubset(set(reader.fieldnames or [])):
+                raise ValueError(f"CSV {path} must contain columns {required}, got {reader.fieldnames}")
             for row in reader:
-                csv_rgb_path = row["image_path"]
-                csv_depth_path = row["mask_path"] if has_mask_col else None
+                out.append(row)
+        if not out:
+            raise ValueError(f"No rows found in {path}")
+        return out
 
-                rgb_path = rewrite_path(csv_rgb_path)
+    def _resolve_path(self, p: str) -> str:
+        if os.path.isabs(p):
+            return p
+        return os.path.join(self.data_root, p)
 
-                if csv_depth_path:
-                    depth_path = rewrite_path(csv_depth_path)
-                else:
-                    inferred = rgb_path
-                    inferred = inferred.replace("rgb_crops_yolo", "mask_crops_yolo")
-                    inferred = inferred.replace("_rgb.png", "_mask.png")
-                    depth_path = inferred
-
-                yaw = float(row["yaw"])
-                pitch = float(row["pitch"])
-                roll = float(row["roll"])
-
-                if not os.path.isfile(rgb_path):
-                    raise FileNotFoundError(f"RGB file not found: {rgb_path}")
-                if not os.path.isfile(depth_path):
-                    raise FileNotFoundError(f"Depth/mask file not found: {depth_path}")
-
-                self.samples.append(
-                    Sample(
-                        rgb_path=rgb_path,
-                        depth_path=depth_path,
-                        yaw=yaw,
-                        pitch=pitch,
-                        roll=roll,
-                    )
-                )
-
-        if len(self.samples) == 0:
-            raise ValueError(f"No samples found in manifest: {manifest_path}")
-
-        print(
-            f"[BiwiRGBDCSV-Eval] Loaded {len(self.samples)} samples from {manifest_path} "
-            f"(data_root={self.data_root})"
-        )
-
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.samples)
 
-    def _load_pair(self, rgb_path: str, depth_path: str):
+    def __getitem__(self, idx):
+        row = self.samples[idx]
+
+        rgb_path   = self._resolve_path(row["rgb_path"])
+        depth_path = self._resolve_path(row["depth_path"])
+        mask_path  = self._resolve_path(row["mask_path"])
+
+        # Load images
         rgb = Image.open(rgb_path).convert("RGB")
-        depth = Image.open(depth_path).convert("L")
-        return rgb, depth
+        depth = Image.open(depth_path)  # assume single-channel or 16-bit
+        mask = Image.open(mask_path).convert("L")
 
-    def __getitem__(self, idx: int):
-        s = self.samples[idx]
-        rgb, depth = self._load_pair(s.rgb_path, s.depth_path)
+        rgb_np = np.array(rgb)  # H,W,3
+        depth_np = np.array(depth)  # H,W or H,W,1
+        mask_np = np.array(mask)  # H,W
 
-        # resize
-        rgb = F.resize(
-            rgb,
-            (self.img_size, self.img_size),
-            interpolation=InterpolationMode.BILINEAR,
-        )
-        depth = F.resize(
-            depth,
-            (self.img_size, self.img_size),
-            interpolation=InterpolationMode.BILINEAR,
-        )
+        # For the model we only need the RGB image (224x224):
+        rgb_resized = rgb.resize((224, 224), Image.BILINEAR)
+        rgb_t = torch.from_numpy(np.array(rgb_resized)).float() / 255.0  # H,W,3
+        rgb_t = rgb_t.permute(2, 0, 1)  # C,H,W
 
-        # to tensor + normalización [-1,1]
-        rgb_t = F.to_tensor(rgb)
-        depth_t = F.to_tensor(depth)
-        rgb_t = (rgb_t - 0.5) / 0.5
-        depth_t = (depth_t - 0.5) / 0.5
+        # Angles (deg) → float tensor [3]
+        yaw = float(row["yaw"])
+        pitch = float(row["pitch"])
+        roll = float(row["roll"])
+        angles = torch.tensor([yaw, pitch, roll], dtype=torch.float32)
 
-        x = torch.cat([rgb_t, depth_t], dim=0)  # [4,H,W]
-
-        target = torch.tensor(
-            [s.yaw, s.pitch, s.roll],
-            dtype=torch.float32,
-        )
         meta = {
-            "rgb_path": s.rgb_path,
-            "depth_path": s.depth_path,
+            "rgb_path": rgb_path,
+            "depth_path": depth_path,
+            "mask_path": mask_path,
+            "yaw": yaw,
+            "pitch": pitch,
+            "roll": roll,
         }
-        return x, target, meta
+
+        return rgb_t, angles, rgb_np, depth_np, mask_np, meta
 
 
 # -----------------------------
-# Model wrapper
+# Model
 # -----------------------------
-class ViTRegressor(nn.Module):
-    def __init__(
-        self,
-        model_name: str,
-        drop: float,
-        drop_path: float,
-        regression_hidden: int,
-        out_dim: int = 3,
-        in_chans: int = 4,
-        pretrained: bool = False,  # para eval, normalmente False
-    ):
+class ViTHeadPoseModel(nn.Module):
+    """
+    ViT-B/16 (vit_base_patch16_224) with a 3D regression head (yaw, pitch, roll).
+    """
+    def __init__(self, model_name: str = "vit_base_patch16_224", pretrained: bool = False):
         super().__init__()
-        self.vit = timm.create_model(
-            model_name,
-            pretrained=pretrained,
-            num_classes=0,
-            drop_rate=drop,
-            drop_path_rate=drop_path,
-            global_pool="avg",
-            in_chans=in_chans,
-        )
-        feat_dim = self.vit.num_features
-
-        if regression_hidden and regression_hidden > 0:
-            self.reg_head = nn.Sequential(
-                nn.Linear(feat_dim, regression_hidden),
-                nn.ReLU(inplace=True),
-                nn.Linear(regression_hidden, out_dim),
-            )
-        else:
-            self.reg_head = nn.Linear(feat_dim, out_dim)
+        self.backbone = timm.create_model(model_name, pretrained=pretrained)
+        in_features = self.backbone.head.in_features
+        self.backbone.reset_classifier(0)  # remove original head
+        self.head = nn.Linear(in_features, 3)
 
     def forward(self, x):
-        feats = self.vit(x)
-        out = self.reg_head(feats)
+        feat = self.backbone.forward_features(x)  # [B, D]
+        if isinstance(feat, (list, tuple)):
+            feat = feat[-1]
+        out = self.head(feat)  # [B, 3]
         return out
 
 
 # -----------------------------
-# Argumentos
+# Visualization utilities
 # -----------------------------
-def parse_args():
-    p = argparse.ArgumentParser(description="Eval BIWI ViT RGBD model")
+def draw_head_pose_arrow(ax, img, yaw_deg, pitch_deg, color="lime", label=""):
+    """
+    Draw a simple 2D arrow on the image to represent head pose direction.
+    This is a qualitative visualization, not a true 3D projection.
 
-    p.add_argument(
-        "--manifest",
-        type=str,
-        required=True,
-        help="CSV manifest to evaluate (e.g. val_yolo.csv)",
-    )
-    p.add_argument(
-        "--data-root",
-        type=str,
-        required=True,
-        help="Root path of 'biwi-kinect-head' to rewrite old absolute paths",
-    )
-    p.add_argument(
-        "--checkpoint",
-        type=str,
-        required=True,
-        help="Path to best.pt (or any .pt checkpoint from training)",
-    )
-    p.add_argument(
-        "--out-dir",
-        type=str,
-        required=True,
-        help="Directory to store evaluation results",
-    )
-    p.add_argument("--batch-size", type=int, default=64)
-    p.add_argument("--num-workers", type=int, default=8)
-    p.add_argument("--gpu", type=int, default=0, help="GPU id (use -1 for CPU)")
+    yaw: rotation around vertical axis (left/right)
+    pitch: rotation around horizontal axis (up/down)
+    """
+    h, w = img.shape[:2]
+    cx, cy = w // 2, h // 2
 
-    return p.parse_args()
+    # convert to radians
+    yaw = np.deg2rad(yaw_deg)
+    pitch = np.deg2rad(pitch_deg)
+
+    # direction vector (very simplified)
+    dx = np.sin(yaw) * np.cos(pitch)
+    dy = -np.sin(pitch)
+
+    length = min(h, w) * 0.25
+    x2 = cx + dx * length
+    y2 = cy + dy * length
+
+    ax.arrow(
+        cx, cy,
+        x2 - cx, y2 - cy,
+        head_width=h * 0.02,
+        head_length=h * 0.03,
+        length_includes_head=True,
+        color=color,
+        linewidth=2,
+        alpha=0.9,
+    )
+    if label:
+        ax.text(
+            cx, cy,
+            label,
+            color=color,
+            fontsize=8,
+            ha="center",
+            va="bottom",
+            bbox=dict(facecolor="black", alpha=0.4, edgecolor="none")
+        )
+
+
+def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
+    """
+    Create a single PDF report for one sample.
+    `sample` dict keys (from eval loop):
+        - rgb_np, depth_np, mask_np
+        - gt_angles: np.array([yaw, pitch, roll])
+        - pred_angles: np.array([yaw, pitch, roll])
+        - mae_per_axis: np.array([e_yaw, e_pitch, e_roll])
+        - mae_mean: float
+        - meta: dict with paths, etc.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    rgb = sample["rgb_np"]
+    depth = sample["depth_np"]
+    mask = sample["mask_np"]
+    gt = sample["gt_angles"]
+    pred = sample["pred_angles"]
+    mae = sample["mae_per_axis"]
+    mae_mean = sample["mae_mean"]
+    meta = sample["meta"]
+
+    fig, axes = plt.subplots(2, 3, figsize=(11, 7))  # decent size for PDF
+    fig.suptitle(f"BIWI Head Pose – Best validation sample #{rank+1}", fontsize=14)
+
+    # --- RGB ---
+    ax = axes[0, 0]
+    ax.imshow(rgb)
+    ax.set_title("RGB image")
+    ax.axis("off")
+
+    # Draw GT and prediction arrows
+    draw_head_pose_arrow(ax, rgb, gt[0], gt[1], color="lime", label="GT")
+    draw_head_pose_arrow(ax, rgb, pred[0], pred[1], color="red", label="Pred")
+
+    # --- Depth ---
+    ax = axes[0, 1]
+    ax.imshow(depth, cmap="viridis")
+    ax.set_title("Depth image")
+    ax.axis("off")
+
+    # --- Mask ---
+    ax = axes[0, 2]
+    ax.imshow(mask, cmap="gray")
+    ax.set_title("Mask image")
+    ax.axis("off")
+
+    # --- Text with metrics ---
+    ax = axes[1, 0]
+    ax.axis("off")
+
+    text_lines = [
+        "Head pose (degrees)",
+        "",
+        f"GT yaw / pitch / roll: {gt[0]:.2f} / {gt[1]:.2f} / {gt[2]:.2f}",
+        f"Pred yaw / pitch / roll: {pred[0]:.2f} / {pred[1]:.2f} / {pred[2]:.2f}",
+        "",
+        "Absolute error (degrees)",
+        f"yaw:   {mae[0]:.2f}",
+        f"pitch: {mae[1]:.2f}",
+        f"roll:  {mae[2]::.2f}",
+        "",
+        f"Mean MAE: {mae_mean:.2f} deg",
+        "",
+        "Paths:",
+        os.path.basename(meta.get("rgb_path", "")),
+        os.path.basename(meta.get("depth_path", "")),
+        os.path.basename(meta.get("mask_path", "")),
+    ]
+    ax.text(
+        0.0, 1.0,
+        "\n".join(text_lines),
+        transform=ax.transAxes,
+        fontsize=9,
+        va="top",
+        ha="left",
+    )
+
+    # --- Pred vs GT per-axis bar plot ---
+    ax = axes[1, 1]
+    ax.set_title("GT vs Pred angles")
+    labels = ["yaw", "pitch", "roll"]
+    x = np.arange(len(labels))
+    width = 0.35
+    ax.bar(x - width/2, gt, width, label="GT")
+    ax.bar(x + width/2, pred, width, label="Pred")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("Degrees")
+    ax.legend()
+
+    # --- Error per-axis bar plot ---
+    ax = axes[1, 2]
+    ax.set_title("Absolute error per axis")
+    ax.bar(labels, mae)
+    ax.set_ylabel("Degrees")
+
+    pdf_name = os.path.join(out_dir, f"biwi_best_sample_{rank+1:02d}.pdf")
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.savefig(pdf_name, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    print(f"[INFO] Saved {pdf_name}")
 
 
 # -----------------------------
-# Métricas
+# Evaluation
 # -----------------------------
-def compute_metrics(gt: np.ndarray, pred: np.ndarray):
-    # gt, pred: [N,3] en grados
-    err = np.abs(pred - gt)
-    mae = err.mean(axis=0)  # [3]
-    mae_mean = err.mean()
+def evaluate_and_generate_pdfs(args):
+    device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
 
-    rmse = np.sqrt(((pred - gt) ** 2).mean(axis=0))
-    rmse_mean = np.sqrt(((pred - gt) ** 2).mean())
-
-    percentiles = np.percentile(err, [50, 90, 95], axis=0)  # [3,3]
-
-    metrics = {
-        "mae_yaw": float(mae[0]),
-        "mae_pitch": float(mae[1]),
-        "mae_roll": float(mae[2]),
-        "mae_mean": float(mae_mean),
-        "rmse_yaw": float(rmse[0]),
-        "rmse_pitch": float(rmse[1]),
-        "rmse_roll": float(rmse[2]),
-        "rmse_mean": float(rmse_mean),
-        "p50_yaw": float(percentiles[0, 0]),
-        "p50_pitch": float(percentiles[0, 1]),
-        "p50_roll": float(percentiles[0, 2]),
-        "p90_yaw": float(percentiles[1, 0]),
-        "p90_pitch": float(percentiles[1, 1]),
-        "p90_roll": float(percentiles[1, 2]),
-        "p95_yaw": float(percentiles[2, 0]),
-        "p95_pitch": float(percentiles[2, 1]),
-        "p95_roll": float(percentiles[2, 2]),
-    }
-    return metrics, err
-
-
-# -----------------------------
-# Main
-# -----------------------------
-def main():
-    args = parse_args()
-
-    os.makedirs(args.out_dir, exist_ok=True)
-
-    # device
-    if args.gpu == -1 or not torch.cuda.is_available():
-        device = torch.device("cpu")
-        print("[INFO] Using CPU")
-    else:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
-        device = torch.device(f"cuda:{args.gpu}")
-        print(f"[INFO] Using GPU {args.gpu}")
-
-    # load checkpoint
-    ckpt = torch.load(args.checkpoint, map_location="cpu")
-    ckpt_args = ckpt.get("args", {})
-    model_name = ckpt_args.get("model", "vit_base_patch16_224")
-    drop = ckpt_args.get("drop", 0.0)
-    drop_path = ckpt_args.get("drop_path", 0.0)
-    reg_hidden = ckpt_args.get("reg_hidden", 0)
-    img_size = ckpt_args.get("img_size", 224)
-
-    print("[INFO] Checkpoint loaded from:", args.checkpoint)
-    print("[INFO] Model:", model_name)
-    print("[INFO] img_size:", img_size)
-
-    model = ViTRegressor(
-        model_name=model_name,
-        drop=drop,
-        drop_path=drop_path,
-        regression_hidden=reg_hidden,
-        out_dim=3,
-        in_chans=4,
-        pretrained=False,
+    # Dataset & loader
+    val_ds = BiwiHeadPoseRGBDDataset(
+        csv_path=args.val_manifest,
+        data_root=args.data_root
     )
-    model.load_state_dict(ckpt["model"])
-    model.to(device)
-    model.eval()
-
-    # dataset + loader
-    ds = BiwiRGBDCSV(
-        manifest_path=args.manifest,
-        img_size=img_size,
-        data_root=args.data_root,
-    )
-    loader = DataLoader(
-        ds,
+    val_loader = DataLoader(
+        val_ds,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=True,
+        pin_memory=True
     )
 
-    all_gt = []
-    all_pred = []
-    rows_out = []
+    # Model
+    model = ViTHeadPoseModel(
+        model_name=args.model_name,
+        pretrained=False,
+    ).to(device)
+
+    # Load checkpoint
+    ckpt = torch.load(args.checkpoint, map_location=device)
+    if "model" in ckpt:
+        state_dict = ckpt["model"]
+    else:
+        state_dict = ckpt
+    model.load_state_dict(state_dict, strict=True)
+    model.eval()
+
+    all_samples = []
+    mae_sum = np.zeros(3, dtype=np.float64)
+    count = 0
 
     with torch.no_grad():
-        for x, target, meta in loader:
-            x = x.to(device, non_blocking=True)
-            target = target.to(device, non_blocking=True)
+        for batch_idx, (rgb_t, angles_t, rgb_np, depth_np, mask_np, meta) in enumerate(val_loader):
+            rgb_t = rgb_t.to(device)           # [B,3,224,224]
+            angles_t = angles_t.to(device)     # [B,3]
 
-            pred = model(x)  # [B,3]
+            preds = model(rgb_t)               # [B,3]
+            # convert to numpy
+            gt_np = angles_t.cpu().numpy()
+            pred_np = preds.cpu().numpy()
 
-            all_gt.append(target.cpu().numpy())
-            all_pred.append(pred.cpu().numpy())
+            # absolute error per axis
+            abs_err = np.abs(pred_np - gt_np)  # [B,3]
+            mae_sum += abs_err.sum(axis=0)
+            count += abs_err.shape[0]
 
-            # guardar fila por muestra
-            for i in range(x.size(0)):
-                gt_i = target[i].cpu().numpy()
-                pr_i = pred[i].cpu().numpy()
-                err_i = np.abs(pr_i - gt_i)
+            for i in range(abs_err.shape[0]):
+                mae_per_axis = abs_err[i]
+                mae_mean = float(mae_per_axis.mean())
 
-                rows_out.append(
-                    {
-                        "rgb_path": meta["rgb_path"][i],
-                        "depth_path": meta["depth_path"][i],
-                        "yaw_gt": float(gt_i[0]),
-                        "pitch_gt": float(gt_i[1]),
-                        "roll_gt": float(gt_i[2]),
-                        "yaw_pred": float(pr_i[0]),
-                        "pitch_pred": float(pr_i[1]),
-                        "roll_pred": float(pr_i[2]),
-                        "err_yaw": float(err_i[0]),
-                        "err_pitch": float(err_i[1]),
-                        "err_roll": float(err_i[2]),
-                    }
-                )
+                all_samples.append({
+                    "rgb_np": rgb_np[i].numpy(),
+                    "depth_np": depth_np[i].numpy(),
+                    "mask_np": mask_np[i].numpy(),
+                    "gt_angles": gt_np[i],
+                    "pred_angles": pred_np[i],
+                    "mae_per_axis": mae_per_axis,
+                    "mae_mean": mae_mean,
+                    "meta": {k: meta[k][i] for k in meta},  # each meta[k] is a list
+                })
 
-    all_gt = np.concatenate(all_gt, axis=0)   # [N,3]
-    all_pred = np.concatenate(all_pred, axis=0)
+    overall_mae = mae_sum / max(1, count)
+    print(f"[INFO] Global MAE (yaw, pitch, roll): {overall_mae}")
+    print(f"[INFO] Mean MAE: {overall_mae.mean():.3f} deg")
 
-    metrics, err = compute_metrics(all_gt, all_pred)
+    # sort by mae_mean ascending (best first)
+    all_samples.sort(key=lambda d: d["mae_mean"])
 
-    print("\n===== EVALUATION RESULTS =====")
-    print(f"MAE (yaw, pitch, roll): {metrics['mae_yaw']:.3f}, {metrics['mae_pitch']:.3f}, {metrics['mae_roll']:.3f}")
-    print(f"MAE mean: {metrics['mae_mean']:.3f} deg")
-    print(f"RMSE (yaw, pitch, roll): {metrics['rmse_yaw']:.3f}, {metrics['rmse_pitch']:.3f}, {metrics['rmse_roll']:.3f}")
-    print(f"RMSE mean: {metrics['rmse_mean']:.3f} deg")
-    print("Percentiles (deg):")
-    print(f"  P50 (yaw, pitch, roll): {metrics['p50_yaw']:.3f}, {metrics['p50_pitch']:.3f}, {metrics['p50_roll']:.3f}")
-    print(f"  P90 (yaw, pitch, roll): {metrics['p90_yaw']:.3f}, {metrics['p90_pitch']:.3f}, {metrics['p90_roll']:.3f}")
-    print(f"  P95 (yaw, pitch, roll): {metrics['p95_yaw']:.3f}, {metrics['p95_pitch']:.3f}, {metrics['p95_roll']:.3f}")
+    # select best K
+    k = min(args.num_pdfs, len(all_samples))
+    print(f"[INFO] Generating {k} PDF reports (best validation samples).")
 
-    # save metrics JSON
-    metrics_path = os.path.join(args.out_dir, "eval_metrics.json")
-    with open(metrics_path, "w") as f:
-        json.dump(metrics, f, indent=2)
-    print("Saved metrics to:", metrics_path)
+    for rank in range(k):
+        save_sample_pdf(all_samples[rank], args.output_dir, rank)
 
-    # save predictions CSV
-    pred_csv = os.path.join(args.out_dir, "predictions.csv")
-    with open(pred_csv, "w", newline="") as f:
-        fieldnames = list(rows_out[0].keys())
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for r in rows_out:
-            writer.writerow(r)
-    print("Saved predictions to:", pred_csv)
+
+# -----------------------------
+# Argparse
+# -----------------------------
+def parse_args():
+    p = argparse.ArgumentParser(
+        description="Evaluate ViT-B/16 RGBD on BIWI and generate PDF reports."
+    )
+    p.add_argument("--val-manifest", type=str, required=True,
+                   help="CSV file for validation split (with rgb_path, depth_path, mask_path, yaw, pitch, roll).")
+    p.add_argument("--data-root", type=str, required=True,
+                   help="Root directory for BIWI data (used to resolve paths in CSV).")
+    p.add_argument("--checkpoint", type=str, required=True,
+                   help="Path to trained model checkpoint (.pt/.pth).")
+    p.add_argument("--model-name", type=str, default="vit_base_patch16_224")
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--output-dir", type=str, default="./biwi_eval_pdfs")
+    p.add_argument("--num-pdfs", type=int, default=5,
+                   help="Number of best validation samples to export as PDF.")
+    p.add_argument("--cpu", action="store_true", help="Force CPU inference.")
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+    evaluate_and_generate_pdfs(args)
 
 
 if __name__ == "__main__":

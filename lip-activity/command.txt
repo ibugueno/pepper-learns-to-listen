@@ -1,6 +1,6 @@
 # prepare dataset
 
-python prepare_ava_activespeaker_imgonly.py \
+python 1_prepare_ava_activespeaker_imgonly.py \
     --videos-root ../input/ava/videos/speech \
     --ann-root ../input/ava/annotations/ava_activespeaker_train_v1.0/ava_activespeaker_train_v1.0 \
     --output-root ../input/ava/ava_spk_img \
@@ -10,15 +10,17 @@ python prepare_ava_activespeaker_imgonly.py \
 
 # train
 
-python train_ava_activespeaker_imgonly.py \
-  --train-manifest /ruta/manifests/ava_spk_train.csv \
-  --val-manifest   /ruta/manifests/ava_spk_val.csv \
+python 2_train_ava_activespeaker.py \
+  --train-manifest ../input/ava/ava_spk_img/manifests/ava_spk_train.csv \
+  --val-manifest   ../input/ava/ava_spk_img/manifests/ava_spk_val.csv \
   --img-size 160 \
   --num-frames 32 \
-  --batch-size 32 \
-  --epochs 50 \
+  --batch-size 64 \
+  --epochs 30 \
   --temporal gru \
   --temporal-hidden 256 \
   --lr 3e-4 \
   --opt adamw \
-  --out-dir ./runs/ava_spk_img_gru32
+  --out-dir ../output/ava/ava_spk_img_gru32 \
+  --amp \
+  --num-workers 8 

@@ -40,12 +40,12 @@ python 2_train_biwi_vit.py \
 
   # for evaluate
 
-  python 3_eval_biwi_vit_rgbd.py \
-  --manifest  /app/input/biwi-kinect-head/crops_yolo/val_yolo.csv \
+python 3_eval_biwi_vit_rgbd.py \
+  --val-manifest /app/input/biwi-kinect-head/crops_yolo/val_yolo.csv \
   --data-root /app/input/biwi-kinect-head \
   --checkpoint /app/output/biwi-kinect-head/runs_vit_rgbd/best.pt \
-  --out-dir /app/output/biwi-kinect-head/eval_vit_rgbd_val \
+  --output-dir /app/output/biwi-kinect-head/eval_vit_rgbd_val_pdfs \
   --batch-size 64 \
-  --num-workers 8 \
-  --gpu 0
+  --num-workers 8
+
 
