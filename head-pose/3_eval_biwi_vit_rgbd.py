@@ -132,25 +132,32 @@ class BiwiHeadPoseRGBDDataset(Dataset):
     def _get_depth_path_from_row(self, row: Dict) -> str:
         """
         Construye la ruta al depth .bin original usando subject y frame_id:
-            data_root/faces_0/<subject>/<frame_id>_depth.bin
+            data_root/faces_0/<subject>/frame_<frame_id>_depth.bin
         Si falla, usa la heurística _infer_depth_path como fallback.
         """
         subject = str(row.get("subject", "")).strip()
-        frame_id = str(row.get("frame_id", "")).strip()  # p.ej. "frame_00388"
+        frame_id = str(row.get("frame_id", "")).strip()  # p.ej. "00388" o "frame_00388"
 
         if subject and frame_id:
+            # Aseguramos que tenga el prefijo "frame_"
+            if not frame_id.startswith("frame_"):
+                frame_name = f"frame_{frame_id}"
+            else:
+                frame_name = frame_id
+
             cand = os.path.join(
                 self.data_root,
                 "faces_0",
                 subject,
-                f"{frame_id}_depth.bin",
+                f"{frame_name}_depth.bin",
             )
             if os.path.isfile(cand):
                 return cand
 
-        # Fallback: heurística anterior
+        # Fallback: heurística anterior (por si en algún momento tienes depth_crops_yolo)
         rgb_path = self._resolve_path(row["image_path"])
         return self._infer_depth_path(rgb_path)
+
 
     def _load_depth_bin(self, depth_path: str) -> np.ndarray:
         """
