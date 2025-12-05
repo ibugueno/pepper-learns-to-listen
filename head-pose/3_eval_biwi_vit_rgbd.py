@@ -183,24 +183,29 @@ class BiwiHeadPoseRGBDDataset(Dataset):
         rgb_path  = self._resolve_path(row["image_path"])
         mask_path = self._resolve_path(row["mask_path"])
 
-        # RGB crop (ya recortado por YOLO)
         rgb = Image.open(rgb_path).convert("RGB")
-        rgb_np = np.array(rgb)  # Hc,Wc,3
-
-        # Mask crop (visualización)
+        rgb_np = np.array(rgb)
         mask = Image.open(mask_path).convert("L")
         mask_np = np.array(mask)
 
         # --- Depth FULL FRAME desde faces_0 ---
         depth_path_full = self._get_depth_path_from_row(row)
+
+        # DEBUG: ver qué profundidad está encontrando
+        if idx < 5:  # o quítalo si quieres ver todo
+            print(f"[DEBUG] idx={idx}")
+            print(f"  rgb_path      = {rgb_path}")
+            print(f"  subject       = {row.get('subject')}")
+            print(f"  frame_id      = {row.get('frame_id')}")
+            print(f"  depth_path_full = {depth_path_full}")
+            print(f"  exists?       = {os.path.isfile(depth_path_full) if depth_path_full else False}")
+
         depth_full = np.zeros((rgb_np.shape[0], rgb_np.shape[1]), dtype=np.float32)
 
         if depth_path_full and os.path.isfile(depth_path_full):
             depth_full = self._load_depth_bin(depth_path_full)  # H,W
-
             H, W = depth_full.shape
 
-            # BBox en coords del frame original
             xmin = int(float(row.get("bbox_xmin", 0)))
             ymin = int(float(row.get("bbox_ymin", 0)))
             xmax = int(float(row.get("bbox_xmax", W)))
@@ -211,18 +216,20 @@ class BiwiHeadPoseRGBDDataset(Dataset):
             ymin = max(0, min(ymin, H - 1))
             ymax = max(0, min(ymax, H))
 
-            if xmax <= xmin or ymax <= ymin:
-                raise ValueError(
-                    f"Invalid bbox for idx={idx}: "
-                    f"({xmin},{ymin})-({xmax},{ymax}) on depth {W}x{H}"
-                )
-
             depth_crop = depth_full[ymin:ymax, xmin:xmax]
+
+            # DEBUG: ver si el recorte tiene info
+            if idx < 5:
+                print(f"  depth_full min/max = {depth_full.min()} / {depth_full.max()}")
+                print(f"  depth_crop shape   = {depth_crop.shape}")
+                print(f"  depth_crop min/max = {depth_crop.min()} / {depth_crop.max()}")
         else:
-            # Si no encontramos depth, todo ceros (pero esto debería ser la excepción)
             depth_crop = np.zeros(rgb_np.shape[:2], dtype=np.float32)
+            if idx < 5:
+                print("  [WARN] NO depth file found, depth_crop set to zeros.")
 
         depth_np = depth_crop
+
 
         # --- Build 4-channel input [RGBD] (224x224) ---
         rgb_resized = rgb.resize((224, 224), Image.BILINEAR)
