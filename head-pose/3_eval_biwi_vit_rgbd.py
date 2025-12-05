@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # 3_eval_biwi_vit_rgbd.py
 #
-# Evaluate ViT-B/16 head pose model on BIWI and
+# Evaluate ViT-B/16 RGBD head pose model on BIWI and
 # generate K PDF (vector) reports for the most accurate
 # validation samples, showing:
 #   - RGB image
@@ -139,10 +139,24 @@ class BiwiHeadPoseRGBDDataset(Dataset):
         mask = Image.open(mask_path).convert("L")
         mask_np = np.array(mask)
 
-        # Model input: RGB resized to 224x224
+        # --- Build 4-channel input [RGBD] for the model ---
+        # Resize RGB and depth to 224x224
         rgb_resized = rgb.resize((224, 224), Image.BILINEAR)
-        rgb_t = torch.from_numpy(np.array(rgb_resized)).float() / 255.0
-        rgb_t = rgb_t.permute(2, 0, 1)  # C,H,W
+        rgb_arr = np.array(rgb_resized).astype(np.float32) / 255.0  # H,W,3
+
+        depth_img = Image.fromarray(depth_np)
+        depth_resized = depth_img.resize((224, 224), Image.NEAREST)
+        depth_arr = np.array(depth_resized).astype(np.float32)
+
+        # Normalize depth to [0,1] if possible (avoid div by zero)
+        if depth_arr.max() > 0:
+            depth_arr = depth_arr / depth_arr.max()
+        depth_arr = depth_arr[..., None]  # H,W,1
+
+        # Concatenate → H,W,4
+        rgbd_arr = np.concatenate([rgb_arr, depth_arr], axis=-1)
+        # To tensor C,H,W
+        rgbd_t = torch.from_numpy(rgbd_arr).permute(2, 0, 1)  # [4,224,224]
 
         # Angles
         yaw = float(row["yaw"])
@@ -160,34 +174,42 @@ class BiwiHeadPoseRGBDDataset(Dataset):
             "frame_id": row.get("frame_id", ""),
         }
 
-        return rgb_t, angles, rgb_np, depth_np, mask_np, meta
+        return rgbd_t, angles, rgb_np, depth_np, mask_np, meta
 
 
 # -----------------------------
-# Model (matching training checkpoint: vit + reg_head)
+# Model (matching training checkpoint: vit + reg_head, 4ch, fc_norm)
 # -----------------------------
 class ViTHeadPoseModel(nn.Module):
     """
     ViT-B/16 (vit_base_patch16_224) with a 3D regression head (yaw, pitch, roll).
 
     The module names are:
-        - self.vit      (backbone)
+        - self.vit      (backbone, in_chans=4, global_pool='avg')
         - self.reg_head (3D regression)
-    to match checkpoints that store keys like "vit.*" and "reg_head.*".
+
+    This matches checkpoints with keys like "vit.*" and "reg_head.*",
+    and with "vit.fc_norm.*" instead of "vit.norm.*".
     """
     def __init__(self, model_name: str = "vit_base_patch16_224"):
         super().__init__()
-        # num_classes=0 => timm returns features instead of logits
-        self.vit = timm.create_model(model_name, pretrained=False, num_classes=0)
-        # timm ViT usually has .num_features for the feature dimension
+        # num_classes=0 => output features instead of logits
+        # in_chans=4 => RGBD
+        # global_pool='avg' => uses fc_norm instead of norm
+        self.vit = timm.create_model(
+            model_name,
+            pretrained=False,
+            num_classes=0,
+            in_chans=4,
+            global_pool="avg",
+        )
         in_features = getattr(self.vit, "num_features", None)
         if in_features is None:
-            # fallback, in case of older timm
             in_features = self.vit.head.in_features
         self.reg_head = nn.Linear(in_features, 3)
 
     def forward(self, x):
-        feat = self.vit(x)  # [B, D] because num_classes=0
+        feat = self.vit(x)  # [B, D]
         out = self.reg_head(feat)  # [B, 3]
         return out
 
@@ -357,11 +379,11 @@ def evaluate_and_generate_pdfs(args):
     count = 0
 
     with torch.no_grad():
-        for rgb_t, angles_t, rgb_np, depth_np, mask_np, meta in val_loader:
-            rgb_t = rgb_t.to(device)
-            angles_t = angles_t.to(device)
+        for rgbd_t, angles_t, rgb_np, depth_np, mask_np, meta in val_loader:
+            rgbd_t = rgbd_t.to(device)      # [B,4,224,224]
+            angles_t = angles_t.to(device)  # [B,3]
 
-            preds = model(rgb_t)
+            preds = model(rgbd_t)
             gt_np = angles_t.cpu().numpy()
             pred_np = preds.cpu().numpy()
 
@@ -402,7 +424,7 @@ def evaluate_and_generate_pdfs(args):
 # -----------------------------
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Evaluate ViT-B/16 on BIWI and generate PDF reports."
+        description="Evaluate ViT-B/16 RGBD on BIWI and generate PDF reports."
     )
     p.add_argument("--val-manifest", type=str, required=True,
                    help="CSV file for validation split (with image_path, yaw, pitch, roll, mask_path, ...).")
