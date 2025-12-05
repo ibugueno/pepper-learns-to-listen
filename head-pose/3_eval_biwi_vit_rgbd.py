@@ -248,84 +248,47 @@ class ViTHeadPoseModel(nn.Module):
 # -----------------------------
 # Visualization utilities
 # -----------------------------
-
-def draw_head_pose_axes(ax, img, yaw_deg, pitch_deg, roll_deg, scale=0.75):
+def draw_head_orientation_arrow(ax, img, yaw_deg, pitch_deg, color="red", scale=0.8):
     """
-    Draw a simple 3D head-pose coordinate frame on top of the image.
+    Draw a single 2D arrow showing the head orientation direction.
+    Uses yaw (left/right) and pitch (up/down).
 
-    - X axis: red
-    - Y axis: green
-    - Z axis: blue
+    This is NOT a full 3D projection — it is a clean 2D visualization
+    that matches intuitive head direction for qualitative inspection.
 
-    Yaw, pitch, roll are in degrees (BIWI convention, approx).
-    The axes are drawn from the center of the image.
+    color: "red" for predicted, "lime" for GT
     """
     h, w = img.shape[:2]
-    cx, cy = w // 2, h // 2
+    cx, cy = w // 2, h // 2     # arrow starts at face center
 
     # Convert to radians
-    yaw = np.deg2rad(yaw_deg)
+    yaw   = np.deg2rad(yaw_deg)
     pitch = np.deg2rad(pitch_deg)
-    roll = np.deg2rad(roll_deg)
 
-    # Rotation matrices (approximate convention)
-    # Yaw   -> rotation around Y axis
-    # Pitch -> rotation around X axis
-    # Roll  -> rotation around Z axis
-    R_y = np.array([
-        [ np.cos(yaw), 0, np.sin(yaw)],
-        [ 0,           1,          0],
-        [-np.sin(yaw), 0, np.cos(yaw)],
-    ])
+    # --- Define arrow direction ---
+    # yaw   > 0 → persona mira hacia SU izquierda → flecha hacia la izquierda en imagen
+    # pitch > 0 → persona mira hacia ARRIBA → flecha hacia arriba
+    #
+    # Ajustes simples y estables:
+    dx = -np.sin(yaw) * np.cos(pitch)
+    dy = -np.sin(pitch)
 
-    R_x = np.array([
-        [1,           0,            0],
-        [0, np.cos(pitch), -np.sin(pitch)],
-        [0, np.sin(pitch),  np.cos(pitch)],
-    ])
+    # Make arrow longer
+    L = min(h, w) * scale
+    x2 = cx + dx * L
+    y2 = cy + dy * L
 
-    R_z = np.array([
-        [np.cos(roll), -np.sin(roll), 0],
-        [np.sin(roll),  np.cos(roll), 0],
-        [0,                      0,   1],
-    ])
+    ax.arrow(
+        cx, cy,
+        x2 - cx, y2 - cy,
+        head_width=h * 0.04,
+        head_length=h * 0.06,
+        length_includes_head=True,
+        color=color,
+        linewidth=4,
+        alpha=0.95,
+    )
 
-    # Total rotation (order approx: roll * yaw * pitch)
-    R = R_z @ R_y @ R_x
-
-    # Canonical axes in head coordinates
-    x_axis = np.array([1., 0., 0.])  # right
-    y_axis = np.array([0., 1., 0.])  # down
-    z_axis = np.array([0., 0., 1.])  # out of the face
-
-    # Rotate
-    x_rot = R @ x_axis
-    y_rot = R @ y_axis
-    z_rot = R @ z_axis
-
-    # Length of the arrows (3x más grande que antes: 0.75 vs 0.25)
-    base_len = min(h, w) * scale
-
-    def _draw_arrow(dir_vec, color):
-        dx3, dy3, dz3 = dir_vec
-        # Proyección muy simple: usamos x,y y cambiamos el signo de y para coords de imagen
-        x2 = cx + dx3 * base_len
-        y2 = cy - dy3 * base_len
-        ax.arrow(
-            cx, cy,
-            x2 - cx, y2 - cy,
-            head_width=h * 0.06,   # más gordo
-            head_length=h * 0.09,  # más largo
-            length_includes_head=True,
-            color=color,
-            linewidth=3,
-            alpha=0.9,
-        )
-
-    # X (rojo), Y (verde), Z (azul)
-    _draw_arrow(x_rot, "red")
-    _draw_arrow(y_rot, "green")
-    _draw_arrow(z_rot, "blue")
 
 
 def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
@@ -334,53 +297,53 @@ def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
       1) RGB original
       2) Depth
       3) Mask
-      4) RGB con sistema de coordenadas de pose predicha
-      5) RGB con sistema de coordenadas de pose GT
+      4) RGB con pose predicha
+      5) RGB con pose GT
     """
     os.makedirs(out_dir, exist_ok=True)
 
-    rgb   = sample["rgb_np"]
+    rgb = sample["rgb_np"]
     depth = sample["depth_np"]
-    mask  = sample["mask_np"]
-    gt    = sample["gt_angles"]       # [yaw, pitch, roll]
-    pred  = sample["pred_angles"]     # [yaw, pitch, roll]
+    mask = sample["mask_np"]
+    gt = sample["gt_angles"]       # yaw, pitch, roll
+    pred = sample["pred_angles"]   # yaw, pitch, roll
 
-    fig, axes = plt.subplots(1, 5, figsize=(20, 4))
+    # -------- Precompute images --------
+    # Copias para dibujar flechas
+    rgb_pred = rgb.copy()
+    rgb_gt   = rgb.copy()
 
-    # 1) RGB original
-    ax = axes[0]
-    ax.imshow(rgb)
-    ax.axis("off")
-    ax.set_title("RGB")
+    # DIBUJAR flechas (usa tu función existente)
+    fig_tmp, ax_tmp = plt.subplots()
+    ax_tmp.imshow(rgb_pred)
+    draw_head_orientation_arrow(ax, rgb, pred[0], pred[1], color="red")
 
-    # 2) Depth
-    ax = axes[1]
-    if depth.ndim == 2:
-        ax.imshow(depth, cmap="viridis")
-    else:
-        ax.imshow(depth)
-    ax.axis("off")
-    ax.set_title("Depth")
+    plt.close(fig_tmp)
 
-    # 3) Mask
-    ax = axes[2]
-    ax.imshow(mask, cmap="gray")
-    ax.axis("off")
-    ax.set_title("Mask")
+    fig_tmp, ax_tmp = plt.subplots()
+    ax_tmp.imshow(rgb_gt)
+    draw_head_orientation_arrow(ax, rgb, gt[0], gt[1], color="lime")
 
-    # 4) RGB con pose predicha (ejes)
-    ax = axes[3]
-    ax.imshow(rgb)
-    ax.axis("off")
-    ax.set_title("Pred Pose")
-    draw_head_pose_axes(ax, rgb, pred[0], pred[1], pred[2])
+    plt.close(fig_tmp)
 
-    # 5) RGB con pose GT (ejes)
-    ax = axes[4]
-    ax.imshow(rgb)
-    ax.axis("off")
-    ax.set_title("GT Pose")
-    draw_head_pose_axes(ax, rgb, gt[0], gt[1], gt[2])
+    # -------- Final layout: 5 imágenes --------
+    fig, axes = plt.subplots(1, 5, figsize=(25, 5))
+
+    panels = [
+        (rgb, "RGB"),
+        (depth, "Depth"),
+        (mask, "Mask"),
+        (rgb_pred, "Pred Pose"),
+        (rgb_gt, "GT Pose"),
+    ]
+
+    for ax, (img, title) in zip(axes, panels):
+        if img.ndim == 2:
+            ax.imshow(img, cmap="gray")
+        else:
+            ax.imshow(img)
+        ax.axis("off")
+        ax.set_title(title)
 
     pdf_path = os.path.join(out_dir, f"sample_{rank+1:02d}.pdf")
     plt.tight_layout()
@@ -388,7 +351,6 @@ def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
     plt.close(fig)
 
     print(f"[INFO] Saved PDF → {pdf_path}")
-
 
 
 
