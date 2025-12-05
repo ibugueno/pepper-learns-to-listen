@@ -221,7 +221,6 @@ class BiwiHeadPoseRGBDDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
-
     def __getitem__(self, idx):
         row = self.samples[idx]
 
@@ -236,7 +235,8 @@ class BiwiHeadPoseRGBDDataset(Dataset):
         # --- Depth FULL FRAME desde faces_0 ---
         depth_path_full = self._get_depth_path_from_row(row)
 
-        if idx < 5:
+        # DEBUG: ver qué profundidad está encontrando
+        if idx < 5:  # o quítalo si quieres ver todo
             print(f"[DEBUG] idx={idx}")
             print(f"  rgb_path      = {rgb_path}")
             print(f"  subject       = {row.get('subject')}")
@@ -262,6 +262,7 @@ class BiwiHeadPoseRGBDDataset(Dataset):
 
             depth_crop = depth_full[ymin:ymax, xmin:xmax]
 
+            # DEBUG: ver si el recorte tiene info
             if idx < 5:
                 print(f"  depth_full min/max = {depth_full.min()} / {depth_full.max()}")
                 print(f"  depth_crop shape   = {depth_crop.shape}")
@@ -271,21 +272,22 @@ class BiwiHeadPoseRGBDDataset(Dataset):
             if idx < 5:
                 print("  [WARN] NO depth file found, depth_crop set to zeros.")
 
-        # depth real para visualizar en el PDF
         depth_np = depth_crop
+
 
         # --- Build 4-channel input [RGBD] (224x224) ---
         rgb_resized = rgb.resize((224, 224), Image.BILINEAR)
         rgb_arr = np.array(rgb_resized).astype(np.float32) / 255.0  # H,W,3
 
-        # IMPORTANTE:
-        # Para el MODELO dejamos la profundidad a CERO, como antes
-        depth_arr_model = np.zeros((224, 224, 1), dtype=np.float32)
+        depth_img = Image.fromarray(depth_np)
+        depth_resized = depth_img.resize((224, 224), Image.NEAREST)
+        depth_arr = np.array(depth_resized).astype(np.float32)
 
-        # (Opcional: si en el futuro replicas el preprocesado de training,
-        # aquí pondrías el depth "bueno" con la misma normalización que usaste al entrenar.)
+        if depth_arr.max() > 0:
+            depth_arr = depth_arr / depth_arr.max()
+        depth_arr = depth_arr[..., None]  # H,W,1
 
-        rgbd_arr = np.concatenate([rgb_arr, depth_arr_model], axis=-1)
+        rgbd_arr = np.concatenate([rgb_arr, depth_arr], axis=-1)
         rgbd_t = torch.from_numpy(rgbd_arr).permute(2, 0, 1)  # [4,224,224]
 
         # Angles
@@ -304,10 +306,7 @@ class BiwiHeadPoseRGBDDataset(Dataset):
             "frame_id": row.get("frame_id", ""),
         }
 
-        # depth_np (real) se devuelve para dibujarlo en el PDF
         return rgbd_t, angles, rgb_np, depth_np, mask_np, meta
-
-
 
 
 # -----------------------------
