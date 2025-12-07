@@ -573,11 +573,11 @@ def evaluate_and_generate_pdfs(args):
     model.load_state_dict(state_dict, strict=True)
     model.eval()
 
-    # Cuántos PDFs quieres en total
-    k = args.num_pdfs
-    generated = 0
+    all_samples = []
+    mae_sum = np.zeros(3, dtype=np.float64)
+    count = 0
 
-    print(f"[INFO] Generating up to {k} PDF reports (in dataset order).")
+    print("[INFO] Running evaluation over validation set...")
 
     with torch.no_grad():
         for rgbd_t, angles_t, rgb_np_list, depth_np_list, mask_np_list, meta in val_loader:
@@ -587,26 +587,44 @@ def evaluate_and_generate_pdfs(args):
             preds = model(rgbd_t)
             gt_np = angles_t.cpu().numpy()       # [B,3]
             pred_np = preds.cpu().numpy()        # [B,3]
+
+            abs_err = np.abs(pred_np - gt_np)    # [B,3]
+            mae_sum += abs_err.sum(axis=0)
+            count += abs_err.shape[0]
+
             batch_size = gt_np.shape[0]
-
             for i in range(batch_size):
-                if generated >= k:
-                    print(f"[INFO] Done: generated {generated} PDFs.")
-                    return
+                mae_per_axis = abs_err[i]                  # [3]
+                mae_mean = float(mae_per_axis.mean())
 
-                sample = {
-                    "rgb_np": rgb_np_list[i],
-                    "depth_np": depth_np_list[i],
-                    "mask_np": mask_np_list[i],
-                    "gt_angles": gt_np[i],
-                    "pred_angles": pred_np[i],
-                    "meta": {key: meta[key][i] for key in meta},
-                }
+                all_samples.append(
+                    {
+                        "rgb_np": rgb_np_list[i],
+                        "depth_np": depth_np_list[i],
+                        "mask_np": mask_np_list[i],
+                        "gt_angles": gt_np[i],
+                        "pred_angles": pred_np[i],
+                        "mae_per_axis": mae_per_axis,
+                        "mae_mean": mae_mean,
+                        "meta": {key: meta[key][i] for key in meta},
+                    }
+                )
 
-                save_sample_pdf(sample, args.output_dir, generated)
-                generated += 1
+    # Métricas globales (opcional, pero útil para tener una idea)
+    overall_mae = mae_sum / max(1, count)
+    print(f"[INFO] Global MAE (yaw, pitch, roll): {overall_mae}")
+    print(f"[INFO] Mean MAE: {overall_mae.mean():.3f} deg")
 
-    print(f"[INFO] Finished. Generated {generated} PDFs in total.")
+    # Ordenar por MAE medio (menor = mejor)
+    all_samples.sort(key=lambda d: d["mae_mean"])
+
+    k = min(args.num_pdfs, len(all_samples))
+    print(f"[INFO] Generating {k} PDF reports (best validation samples).")
+
+    for rank in range(k):
+        save_sample_pdf(all_samples[rank], args.output_dir, rank)
+
+    print(f"[INFO] Finished. Generated {k} PDFs in total.")
 
 
 
