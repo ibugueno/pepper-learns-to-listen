@@ -62,33 +62,20 @@ def save_json(path: str, obj: dict):
 
 
 # -----------------------------
-# Dataset (RGB + Depth)
+# Dataset (RGB + Depth) - usando profundidad .bin como 3_eval_biwi_vit_rgbd.py
 # -----------------------------
-@dataclass
-class Sample:
-    rgb_path: str
-    depth_path: str
-    yaw: float
-    pitch: float
-    roll: float
-
-
 class BiwiRGBDCSV(Dataset):
     """
-    Expects a CSV with header at least:
-      image_path,yaw,pitch,roll
+    Dataset RGBD para BIWI.
 
-    Idealmente (como genera 1_build_biwi_crops_and_csv.py):
-      image_path,yaw,pitch,roll,bbox_xmin,bbox_ymin,bbox_xmax,bbox_ymax,mask_path,subject,frame_id
+    Espera un CSV tipo *_yolo.csv con, al menos, las columnas:
+        image_path, yaw, pitch, roll,
+        bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax,
+        mask_path, subject, frame_id
 
-    - image_path : ruta al recorte RGB (en rgb_crops_yolo).
-    - mask_path  : ruta al recorte de depth/mask (en mask_crops_yolo).
-      Si no está 'mask_path' en el CSV, se intenta inferir a partir de image_path.
-
-    Parámetro extra:
-    - data_root: si no es None, reescribe rutas antiguas como
-      /media/ignacio/KINGSTON/biwi-kinect-head/... a
-      {data_root}/...
+    La profundidad se toma desde:
+        data_root/faces_0/<subject>/frame_<frame_id>_depth.bin
+    y se recorta usando el bbox.
     """
     def __init__(
         self,
@@ -101,79 +88,26 @@ class BiwiRGBDCSV(Dataset):
         if not os.path.isfile(manifest_path):
             raise FileNotFoundError(f"Manifest not found: {manifest_path}")
 
-        self.samples: List[Sample] = []
         self.img_size = img_size
         self.is_train = is_train
         self.augment = augment
         self.data_root = data_root
 
+        # Leer filas completas del CSV
         with open(manifest_path, "r", newline="") as f:
             reader = csv.DictReader(f)
             fieldnames = set(reader.fieldnames or [])
-            req_cols = {"image_path", "yaw", "pitch", "roll"}
-            if not req_cols.issubset(fieldnames):
+            needed = {
+                "image_path", "yaw", "pitch", "roll",
+                "bbox_xmin", "bbox_ymin", "bbox_xmax", "bbox_ymax",
+                "mask_path", "subject", "frame_id",
+            }
+            if not needed.issubset(fieldnames):
                 raise ValueError(
-                    f"Manifest must contain columns at least: {req_cols}. "
+                    f"Manifest must contain columns at least: {needed}. "
                     f"Found: {reader.fieldnames}"
                 )
-
-            has_mask_col = "mask_path" in fieldnames
-
-            def rewrite_path(old_path: str) -> str:
-                """
-                Reescribe paths que empiezan con el prefijo antiguo a data_root/...
-                Si data_root es None o el prefijo no coincide, devuelve el path tal cual.
-                """
-                if old_path is None:
-                    return None
-                if self.data_root is None:
-                    return old_path
-
-                old_prefix = "/media/ignacio/KINGSTON/biwi-kinect-head"
-                if old_path.startswith(old_prefix):
-                    # Tomamos la parte después de 'biwi-kinect-head'
-                    suffix = old_path.split("biwi-kinect-head", 1)[1]
-                    return os.path.join(self.data_root, suffix.lstrip("/"))
-                return old_path
-
-            for row in reader:
-                csv_rgb_path = row["image_path"]
-                csv_depth_path = row["mask_path"] if has_mask_col else None
-
-                # Reescribir paths si corresponde
-                rgb_path = rewrite_path(csv_rgb_path)
-
-                if csv_depth_path:
-                    depth_path = rewrite_path(csv_depth_path)
-                else:
-                    # Infer depth/mask path from RGB crop path:
-                    #   .../rgb_crops_yolo/XX/frame_00001_rgb.png
-                    # -> .../mask_crops_yolo/XX/frame_00001_mask.png
-                    inferred = rgb_path
-                    inferred = inferred.replace("rgb_crops_yolo", "mask_crops_yolo")
-                    inferred = inferred.replace("_rgb.png", "_mask.png")
-                    depth_path = inferred
-
-                yaw = float(row["yaw"])
-                pitch = float(row["pitch"])
-                roll = float(row["roll"])
-
-                if not os.path.isfile(rgb_path):
-                    raise FileNotFoundError(f"RGB file not found: {rgb_path}")
-                if not os.path.isfile(depth_path):
-                    raise FileNotFoundError(
-                        f"Depth/mask file not found: {depth_path}"
-                    )
-
-                self.samples.append(
-                    Sample(
-                        rgb_path=rgb_path,
-                        depth_path=depth_path,
-                        yaw=yaw,
-                        pitch=pitch,
-                        roll=roll,
-                    )
-                )
+            self.samples = list(reader)
 
         if len(self.samples) == 0:
             raise ValueError(f"No samples found in manifest: {manifest_path}")
@@ -183,91 +117,224 @@ class BiwiRGBDCSV(Dataset):
             f"(train={self.is_train}, augment={self.augment}, data_root={self.data_root})"
         )
 
+    # ---------- helpers copia de 3_eval_biwi_vit_rgbd.py ----------
+
+    def _resolve_path(self, p: str) -> str:
+        """
+        Resuelve una ruta del CSV a algo válido bajo data_root.
+        """
+        if not os.path.isabs(p):
+            # relativo al data_root
+            if self.data_root is None:
+                return p
+            return os.path.join(self.data_root, p)
+
+        if os.path.isfile(p):
+            return p
+
+        # Caso rutas viejas con .../biwi-kinect-head/...
+        marker = "biwi-kinect-head"
+        if self.data_root is not None and marker in p:
+            _, after = p.split(marker, 1)
+            after = after.lstrip("/\\")
+            candidate = os.path.join(self.data_root, after)
+            if os.path.isfile(candidate):
+                return candidate
+
+        # último intento: basename dentro de data_root
+        if self.data_root is not None:
+            candidate = os.path.join(self.data_root, os.path.basename(p))
+            if os.path.isfile(candidate):
+                return candidate
+
+        raise FileNotFoundError(
+            f"Cannot resolve path '{p}' under data_root '{self.data_root}'"
+        )
+
+    def _infer_depth_path(self, rgb_path: str) -> str:
+        """
+        Fallback: intenta deducir un depth PNG a partir del RGB, por si
+        en algún caso sí tienes depth_crops_yolo generados.
+        """
+        candidates = []
+        dirname, fname = os.path.split(rgb_path)
+
+        # Caso rgb_crops_yolo -> depth_crops_yolo
+        if "rgb_crops_yolo" in dirname:
+            candidates.append(
+                os.path.join(
+                    dirname.replace("rgb_crops_yolo", "depth_crops_yolo"),
+                    fname.replace("_rgb.png", "_depth.png"),
+                )
+            )
+
+        if "rgb" in dirname:
+            candidates.append(os.path.join(dirname.replace("rgb", "depth"), fname))
+        if "color" in dirname:
+            candidates.append(os.path.join(dirname.replace("color", "depth"), fname))
+
+        parent = os.path.dirname(dirname)
+        depth_dir = os.path.join(parent, "depth")
+        candidates.append(os.path.join(depth_dir, fname))
+
+        for c in candidates:
+            if os.path.isfile(c):
+                return c
+
+        return ""
+
+    def _get_depth_path_from_row(self, row: dict) -> str:
+        """
+        Construye la ruta al depth .bin original usando subject y frame_id:
+            data_root/faces_0/<subject>/frame_<frame_id>_depth.bin
+        Si falla, usa la heurística _infer_depth_path como fallback.
+        """
+        subject = str(row.get("subject", "")).strip()
+        frame_id = str(row.get("frame_id", "")).strip()
+
+        if subject and frame_id and self.data_root is not None:
+            if not frame_id.startswith("frame_"):
+                frame_name = f"frame_{frame_id}"
+            else:
+                frame_name = frame_id
+
+            cand = os.path.join(
+                self.data_root,
+                "faces_0",
+                subject,
+                f"{frame_name}_depth.bin",
+            )
+            if os.path.isfile(cand):
+                return cand
+
+        # Fallback: heurística antigua (por si en algún momento tienes depth_crops_yolo)
+        rgb_path = self._resolve_path(row["image_path"])
+        return self._infer_depth_path(rgb_path)
+
+    def _load_depth_bin(self, depth_path: str) -> np.ndarray:
+        """
+        Lee el depth .bin comprimido de BIWI y lo devuelve como imagen 2D (float32).
+        Mismo código que en 3_eval_biwi_vit_rgbd.py.
+        """
+        import struct
+
+        with open(depth_path, "rb") as f:
+            header = f.read(8)
+            if len(header) != 8:
+                raise ValueError(f"Cannot read width/height from {depth_path}")
+            im_width, im_height = struct.unpack("ii", header)
+
+            num_pixels = im_width * im_height
+            depth_flat = np.zeros(num_pixels, dtype=np.int16)
+
+            p = 0
+            while p < num_pixels:
+                # numempty
+                buf = f.read(4)
+                if len(buf) != 4:
+                    raise ValueError(f"Cannot read numempty from {depth_path} at p={p}")
+                (numempty,) = struct.unpack("i", buf)
+
+                if numempty > 0:
+                    end_zero = min(p + numempty, num_pixels)
+                    depth_flat[p:end_zero] = 0
+                else:
+                    end_zero = p
+
+                # numfull
+                buf = f.read(4)
+                if len(buf) != 4:
+                    raise ValueError(f"Cannot read numfull from {depth_path} at p={p}")
+                (numfull,) = struct.unpack("i", buf)
+
+                if numfull > 0:
+                    vals = np.frombuffer(
+                        f.read(numfull * 2),
+                        dtype=np.int16,
+                        count=numfull,
+                    )
+                    start_full = end_zero
+                    end_full = min(start_full + numfull, num_pixels)
+                    depth_flat[start_full:end_full] = vals[: (end_full - start_full)]
+
+                p += numempty + numfull
+
+            depth_img = depth_flat.reshape(im_height, im_width).astype(np.float32)
+            return depth_img
+
+    # ---------- API Dataset ----------
+
     def __len__(self) -> int:
         return len(self.samples)
 
-    def _load_pair(self, rgb_path: str, depth_path: str):
-        rgb = Image.open(rgb_path).convert("RGB")
-        depth = Image.open(depth_path).convert("L")  # mask/depth recortado
-        return rgb, depth
-
-    def _apply_transforms(
-        self, rgb: Image.Image, depth: Image.Image
-    ) -> torch.Tensor:
-        """
-        Aplica las mismas transformaciones geométricas a RGB y Depth.
-        Luego:
-          - RGB: to_tensor + (x - 0.5) / 0.5
-          - Depth: to_tensor + (x - 0.5) / 0.5
-        Devuelve tensor [4, H, W] con canales [R,G,B,Depth].
-        """
-        # Resize
-        rgb = F.resize(
-            rgb,
-            (self.img_size, self.img_size),
-            interpolation=InterpolationMode.BILINEAR,
-        )
-        depth = F.resize(
-            depth,
-            (self.img_size, self.img_size),
-            interpolation=InterpolationMode.BILINEAR,
-        )
-
-        # Geometric augmentation (compartida)
-        if self.is_train and self.augment:
-            # Flip horizontal
-            if random.random() < 0.5:
-                rgb = F.hflip(rgb)
-                depth = F.hflip(depth)
-
-            # Pequeño RandomAffine compartido (opcional)
-            if random.random() < 0.3:
-                angle = random.uniform(-10, 10)
-                max_trans = int(0.05 * self.img_size)
-                tx = random.randint(-max_trans, max_trans)
-                ty = random.randint(-max_trans, max_trans)
-                scale = random.uniform(0.95, 1.05)
-                shear = random.uniform(-5, 5)
-
-                rgb = F.affine(
-                    rgb,
-                    angle=angle,
-                    translate=(tx, ty),
-                    scale=scale,
-                    shear=(shear, 0.0),
-                    interpolation=InterpolationMode.BILINEAR,
-                )
-                depth = F.affine(
-                    depth,
-                    angle=angle,
-                    translate=(tx, ty),
-                    scale=scale,
-                    shear=(shear, 0.0),
-                    interpolation=InterpolationMode.BILINEAR,
-                )
-
-        # To tensor (0..1)
-        rgb_t = F.to_tensor(rgb)      # [3,H,W], float32
-        depth_t = F.to_tensor(depth)  # [1,H,W], float32
-
-        # Normalización a [-1,1]
-        rgb_t = (rgb_t - 0.5) / 0.5
-        depth_t = (depth_t - 0.5) / 0.5
-
-        x = torch.cat([rgb_t, depth_t], dim=0)  # [4,H,W]
-        return x
-
     def __getitem__(self, idx: int):
-        s = self.samples[idx]
+        row = self.samples[idx]
 
-        rgb, depth = self._load_pair(s.rgb_path, s.depth_path)
-        x = self._apply_transforms(rgb, depth)
+        rgb_path = self._resolve_path(row["image_path"])
+        rgb = Image.open(rgb_path).convert("RGB")
+        rgb_np = np.array(rgb)
 
-        target = torch.tensor(
-            [s.yaw, s.pitch, s.roll],
-            dtype=torch.float32,
-        )
+        depth_path_full = self._get_depth_path_from_row(row)
+
+        # DEBUG: primeras muestras, mostrar qué depth está encontrando
+        if idx < 5:
+            print(f"[DEBUG][BiwiRGBDCSV] idx={idx}")
+            print(f"  rgb_path        = {rgb_path}")
+            print(f"  subject         = {row.get('subject')}")
+            print(f"  frame_id        = {row.get('frame_id')}")
+            print(f"  depth_path_full = {depth_path_full}")
+            print(f"  exists?         = {os.path.isfile(depth_path_full) if depth_path_full else False}")
+
+        depth_full = np.zeros((rgb_np.shape[0], rgb_np.shape[1]), dtype=np.float32)
+
+        if depth_path_full and os.path.isfile(depth_path_full):
+            depth_full = self._load_depth_bin(depth_path_full)
+            H, W = depth_full.shape
+
+            xmin = int(float(row.get("bbox_xmin", 0)))
+            ymin = int(float(row.get("bbox_ymin", 0)))
+            xmax = int(float(row.get("bbox_xmax", W)))
+            ymax = int(float(row.get("bbox_ymax", H)))
+
+            xmin = max(0, min(xmin, W - 1))
+            xmax = max(0, min(xmax, W))
+            ymin = max(0, min(ymin, H - 1))
+            ymax = max(0, min(ymax, H))
+
+            depth_crop = depth_full[ymin:ymax, xmin:xmax]
+
+            if idx < 5:
+                print(f"  depth_full min/max = {depth_full.min()} / {depth_full.max()}")
+                print(f"  depth_crop shape   = {depth_crop.shape}")
+                print(f"  depth_crop min/max = {depth_crop.min()} / {depth_crop.max()}")
+        else:
+            depth_crop = np.zeros(rgb_np.shape[:2], dtype=np.float32)
+            if idx < 5:
+                print("  [WARN] NO depth file found, depth_crop set to zeros.")
+
+        # Build tensor RGBD [4,H,W] del mismo modo que en 3_eval:
+        rgb_resized = rgb.resize((self.img_size, self.img_size), Image.BILINEAR)
+        rgb_arr = np.array(rgb_resized).astype(np.float32) / 255.0  # H,W,3
+
+        depth_img = Image.fromarray(depth_crop)
+        depth_resized = depth_img.resize((self.img_size, self.img_size), Image.NEAREST)
+        depth_arr = np.array(depth_resized).astype(np.float32)
+
+        if depth_arr.max() > 0:
+            depth_arr = depth_arr / depth_arr.max()
+        depth_arr = depth_arr[..., None]  # H,W,1
+
+        rgbd_arr = np.concatenate([rgb_arr, depth_arr], axis=-1)  # H,W,4
+        x = torch.from_numpy(rgbd_arr).permute(2, 0, 1).float()   # [4,H,W]
+
+        # ángulos
+        yaw = float(row["yaw"])
+        pitch = float(row["pitch"])
+        roll = float(row["roll"])
+        target = torch.tensor([yaw, pitch, roll], dtype=torch.float32)
+
         return x, target
+
 
 
 # -----------------------------
