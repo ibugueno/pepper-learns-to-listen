@@ -619,12 +619,59 @@ def evaluate_and_generate_pdfs(args):
     all_samples.sort(key=lambda d: d["mae_mean"])
 
     k = min(args.num_pdfs, len(all_samples))
-    print(f"[INFO] Generating {k} PDF reports (best validation samples).")
+    print(f"[INFO] Selecting {k} BEST samples with DIVERSE poses.")
 
-    for rank in range(k):
-        save_sample_pdf(all_samples[rank], args.output_dir, rank)
+    # -----------------------------
+    # Selección diversa por ángulo
+    # -----------------------------
+    min_angle_dist = 15.0  # en grados, puedes ajustar a 10, 20, etc.
 
-    print(f"[INFO] Finished. Generated {k} PDFs in total.")
+    selected = []
+    selected_indices = set()
+
+    # Usamos greedy: recorremos de mejor a peor MAE
+    for idx, s in enumerate(all_samples):
+        if len(selected) >= k:
+            break
+
+        gt = np.array(s["gt_angles"], dtype=np.float32)  # [yaw, pitch, roll]
+
+        if not selected:
+            # Siempre tomamos el primero (mejor MAE)
+            selected.append(s)
+            selected_indices.add(idx)
+            continue
+
+        # Distancia mínima en el espacio (yaw,pitch,roll) frente a los ya seleccionados
+        dists = []
+        for sel in selected:
+            gt_sel = np.array(sel["gt_angles"], dtype=np.float32)
+            d = np.linalg.norm(gt - gt_sel)  # grados
+            dists.append(d)
+
+        if min(dists) >= min_angle_dist:
+            selected.append(s)
+            selected_indices.add(idx)
+
+    # Si no alcanzamos k, rellenamos con los siguientes mejores (aunque se parezcan)
+    if len(selected) < k:
+        print(f"[INFO] Only {len(selected)} diverse samples found, filling up to {k}.")
+        for idx, s in enumerate(all_samples):
+            if len(selected) >= k:
+                break
+            if idx in selected_indices:
+                continue
+            selected.append(s)
+            selected_indices.add(idx)
+
+    print(f"[INFO] Final number of selected samples: {len(selected)}")
+
+    # Generar PDFs para los seleccionados
+    os.makedirs(args.output_dir, exist_ok=True)
+    for rank, sample in enumerate(selected):
+        save_sample_pdf(sample, args.output_dir, rank)
+
+    print(f"[INFO] Finished. Generated {len(selected)} PDFs in total.")
 
 
 
