@@ -277,6 +277,7 @@ class BiwiRGBDCSV(Dataset):
         depth_path_full = self._get_depth_path_from_row(row)
 
         # DEBUG: primeras muestras, mostrar qué depth está encontrando
+        '''
         if idx < 5:
             print(f"[DEBUG][BiwiRGBDCSV] idx={idx}")
             print(f"  rgb_path        = {rgb_path}")
@@ -284,7 +285,8 @@ class BiwiRGBDCSV(Dataset):
             print(f"  frame_id        = {row.get('frame_id')}")
             print(f"  depth_path_full = {depth_path_full}")
             print(f"  exists?         = {os.path.isfile(depth_path_full) if depth_path_full else False}")
-
+        '''
+        
         depth_full = np.zeros((rgb_np.shape[0], rgb_np.shape[1]), dtype=np.float32)
 
         if depth_path_full and os.path.isfile(depth_path_full):
@@ -303,10 +305,12 @@ class BiwiRGBDCSV(Dataset):
 
             depth_crop = depth_full[ymin:ymax, xmin:xmax]
 
+            '''
             if idx < 5:
                 print(f"  depth_full min/max = {depth_full.min()} / {depth_full.max()}")
                 print(f"  depth_crop shape   = {depth_crop.shape}")
                 print(f"  depth_crop min/max = {depth_crop.min()} / {depth_crop.max()}")
+            '''
         else:
             depth_crop = np.zeros(rgb_np.shape[:2], dtype=np.float32)
             if idx < 5:
