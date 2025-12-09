@@ -31,8 +31,8 @@ root@67aaa64b6a3e:/app/engagement-detection# python 2_train_engagement_dipser.py
 
   # eval
 
-  python 3_eval_engagement_dipser.py \
+(env) root@67aaa64b6a3e:/app/engagement-detection# python 3_eval_engagement_dipser.py \
   --val-csv /app/input/dipser/engagement_single_v1_bbox/val_bbox.csv \
   --checkpoint /app/output/dipser_single_vit_faces_bin/best.pt \
-  --save engagement_examples.png \
+  --save /app/output/eval_dipser_single_vit_faces_bin/engagement_examples.png \
   --gpu 0
