@@ -1,28 +1,25 @@
 #!/usr/bin/env python3
 # 3_eval_engagement_dipser.py
 #
-# Generate a 6x2 figure (6 columns, 2 rows) with correct predictions:
-#   - Row 0: high engagement (label=1) correctly predicted
-#   - Row 1: low engagement (label=0) correctly predicted
+# Generate a 6x2 figure (6 columns, 2 rows) with examples from both classes:
+#   - Row 0: label = 1 (high engagement)
+#   - Row 1: label = 0 (low engagement)
 #
-# Uses the SAME model definition and normalization as in 2_train_engagement_dipser.py
-# (VisualClassifier with torchvision.resnet18 / torchvision.vit_b_16)
+# Uses ONLY ground-truth labels from the CSV, no model prediction.
 
 import os
 import csv
 import argparse
 from typing import List, Dict
 
-import numpy as np
 from PIL import Image
+import matplotlib.pyplot as plt
 
 import torch
-import torch.nn as nn
 from torch.utils.data import Dataset
 import torchvision.transforms as T
-from torchvision import models as tvm
-
-import matplotlib.pyplot as plt
+import torch.nn as nn
+from torchvision import models as tvm  # kept in case you want to extend later
 
 
 # ---------------- Dataset (same logic as train) ----------------
@@ -113,7 +110,7 @@ class DipserSingleFrameDataset(Dataset):
         return x, y
 
 
-# ---------------- Model (same as train) ----------------
+# (Model class kept for compatibility / future use, but NOT used here)
 class VisualClassifier(nn.Module):
     def __init__(self, n_classes: int, backbone: str = "resnet18"):
         super().__init__()
@@ -137,48 +134,13 @@ class VisualClassifier(nn.Module):
         return self.net(x)
 
 
-@torch.no_grad()
-def predict_one(model: nn.Module, x: torch.Tensor, device: torch.device):
-    x = x.unsqueeze(0).to(device)   # [1, C, H, W]
-    logits = model(x)
-    prob = torch.softmax(logits, dim=1)
-    pred = prob.argmax(dim=1).item()
-    conf = prob.max().item()
-    return pred, conf
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--val-csv", type=str, required=True)
-    parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--img-size", type=int, default=224)
-    parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--n-classes", type=int, default=2)
-    parser.add_argument("--backbone", type=str,
-                        choices=["resnet18", "vit_b16"],
-                        default=None,
-                        help="If None, will be taken from checkpoint args.")
     parser.add_argument("--save", type=str, default="engagement_examples.png")
     args = parser.parse_args()
-
-    device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
-
-    # ---------------- Load checkpoint ----------------
-    ckpt = torch.load(args.checkpoint, map_location=device)
-
-    # If backbone not given, infer from saved args
-    if args.backbone is None:
-        ckpt_args = ckpt.get("args", {})
-        backbone = ckpt_args.get("backbone", "vit_b16")
-    else:
-        backbone = args.backbone
-
-    print(f"[INFO] Using backbone: {backbone}")
-
-    model = VisualClassifier(n_classes=args.n_classes, backbone=backbone)
-    model.load_state_dict(ckpt["model"])   # <- this now matches
-    model.to(device)
-    model.eval()
 
     # ---------------- Build dataset ----------------
     ds = DipserSingleFrameDataset(
@@ -189,44 +151,21 @@ def main():
         augment=False
     )
 
-    # We'll reuse ds.tf for preprocessing
-    tf = ds.tf
+    print(f"[INFO] Loaded {len(ds.samples)} samples from {args.val_csv}")
 
-    correct_engaged = []   # list of (idx, conf)
-    correct_not = []       # list of (idx, conf)
+    # ---------------- Split indices by class label ----------------
+    engaged_indices = [i for i, s in enumerate(ds.samples) if s["label"] == 1]
+    not_engaged_indices = [i for i, s in enumerate(ds.samples) if s["label"] == 0]
 
-    # ---------------- Iterate over samples ----------------
-    print(f"[INFO] Evaluating over {len(ds.samples)} samples...")
-    for idx, s in enumerate(ds.samples):
-        img_path = s["image_path"]
-        label = s["label"]
-        x1, y1, x2, y2 = s["x1"], s["y1"], s["x2"], s["y2"]
+    print(f"[INFO] Found {len(engaged_indices)} engaged samples (label=1)")
+    print(f"[INFO] Found {len(not_engaged_indices)} not engaged samples (label=0)")
 
-        # load + crop
-        img_full = Image.open(img_path).convert("RGB")
-        face = img_full.crop((x1, y1, x2, y2))
+    if len(engaged_indices) == 0 or len(not_engaged_indices) == 0:
+        raise RuntimeError("Need at least one sample of each class to create the figure.")
 
-        x = tf(face)   # normalized tensor
-        pred, conf = predict_one(model, x, device)
-
-        if pred == label:
-            if label == 1:
-                correct_engaged.append((idx, conf))
-            else:
-                correct_not.append((idx, conf))
-
-    print(f"[INFO] Correct engaged: {len(correct_engaged)}")
-    print(f"[INFO] Correct not engaged: {len(correct_not)}")
-
-    if not correct_engaged and not correct_not:
-        raise RuntimeError("No correct predictions found, cannot create figure.")
-
-    # ---------------- Pick top-6 per class by confidence ----------------
-    correct_engaged.sort(key=lambda t: t[1], reverse=True)
-    correct_not.sort(key=lambda t: t[1], reverse=True)
-
-    top_engaged = correct_engaged[:6]
-    top_not = correct_not[:6]
+    # Take first up to 6 from each class
+    engaged_indices = engaged_indices[:6]
+    not_engaged_indices = not_engaged_indices[:6]
 
     # ---------------- Create 6x2 figure ----------------
     fig, axes = plt.subplots(2, 6, figsize=(18, 6))
@@ -234,29 +173,29 @@ def main():
     # Row 0: engaged
     for col in range(6):
         ax = axes[0, col]
-        if col < len(top_engaged):
-            idx, conf = top_engaged[col]
+        if col < len(engaged_indices):
+            idx = engaged_indices[col]
             s = ds.samples[idx]
             img_path = s["image_path"]
             x1, y1, x2, y2 = s["x1"], s["y1"], s["x2"], s["y2"]
             img_full = Image.open(img_path).convert("RGB")
             face = img_full.crop((x1, y1, x2, y2))
             ax.imshow(face)
-            ax.set_title(f"Engaged (p={conf:.2f})")
+            ax.set_title("Engaged (GT=1)")
         ax.axis("off")
 
     # Row 1: not engaged
     for col in range(6):
         ax = axes[1, col]
-        if col < len(top_not):
-            idx, conf = top_not[col]
+        if col < len(not_engaged_indices):
+            idx = not_engaged_indices[col]
             s = ds.samples[idx]
             img_path = s["image_path"]
             x1, y1, x2, y2 = s["x1"], s["y1"], s["x2"], s["y2"]
             img_full = Image.open(img_path).convert("RGB")
             face = img_full.crop((x1, y1, x2, y2))
             ax.imshow(face)
-            ax.set_title(f"Not engaged (p={conf:.2f})")
+            ax.set_title("Not engaged (GT=0)")
         ax.axis("off")
 
     plt.tight_layout()
