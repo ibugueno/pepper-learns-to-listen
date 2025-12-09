@@ -345,13 +345,67 @@ class ViTHeadPoseModel(nn.Module):
         out = self.reg_head(feat)  # [B, 3]
         return out
 
+# -----------------------------
+# Visualization utilities
+# -----------------------------
 
-# -----------------------------
-# Visualization utilities
-# -----------------------------
-# -----------------------------
-# Visualization utilities
-# -----------------------------
+def draw_head_pose_axes(ax, img,
+                        yaw_deg, pitch_deg, roll_deg,
+                        size_factor=0.4):
+    """
+    Dibuja los 3 ejes de la cabeza (X,Y,Z) proyectados en 2D.
+
+    Convención (la más usada en head-pose):
+      - yaw   > 0  : cabeza gira hacia SU izquierda (nuestra derecha)
+      - pitch > 0  : cabeza mira hacia abajo
+      - roll  > 0  : giro horario visto desde la cámara
+
+    Ejes:
+      - X rojo   : derecha de la cabeza
+      - Y verde  : arriba de la cabeza
+      - Z azul   : "hacia fuera" (dirección de la cara)
+    """
+    h, w = img.shape[:2]
+    cx, cy = w * 0.5, h * 0.5
+
+    # Pasar a radianes y adaptar signos (conversión típica de Hopenet/WHENet)
+    pitch = np.deg2rad(pitch_deg)
+    yaw   = -np.deg2rad(yaw_deg)   # signo cambiado
+    roll  = np.deg2rad(roll_deg)
+
+    size = size_factor * min(w, h)
+
+    # Para escribir más compacto
+    sin, cos = np.sin, np.cos
+
+    # PROYECCIÓN 3D→2D (fórmulas estándar para los 3 ejes)
+    # Eje X (rojo)
+    x1 =  size * (cos(yaw) * cos(roll)) \
+        + cx
+    y1 =  size * (cos(pitch) * sin(roll)
+                  + cos(roll) * sin(pitch) * sin(yaw)) \
+        + cy
+
+    # Eje Y (verde)
+    x2 =  size * (-cos(yaw) * sin(roll)) \
+        + cx
+    y2 =  size * (cos(pitch) * cos(roll)
+                  - sin(pitch) * sin(yaw) * sin(roll)) \
+        + cy
+
+    # Eje Z (azul) – dirección “frente”
+    x3 =  size * (sin(yaw)) \
+        + cx
+    y3 =  size * (-cos(yaw) * sin(pitch)) \
+        + cy
+
+    # Dibujar líneas
+    ax.plot([cx, x1], [cy, y1], color="red",   linewidth=3)   # X
+    ax.plot([cx, x2], [cy, y2], color="green", linewidth=3)   # Y
+    ax.plot([cx, x3], [cy, y3], color="blue",  linewidth=3)   # Z
+
+
+
 def draw_head_pose_arrow(ax, img, yaw_deg, pitch_deg, roll_deg=0.0,
                          color="lime", label=""):
     """
@@ -496,24 +550,27 @@ def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
     # 4) Pred
     ax = axes[3]
     ax.imshow(rgb)
-    draw_head_pose_arrow(ax, rgb,
-                         yaw_deg=pred[0],
-                         pitch_deg=pred[1],
-                         roll_deg=pred[2],
-                         color="red")
+    draw_head_pose_axes(
+        ax, rgb,
+        yaw_deg=float(pred[0]),
+        pitch_deg=float(pred[1]),
+        roll_deg=float(pred[2]),
+    )
     ax.axis("off")
     ax.set_title("Pred Pose", fontsize=20)
 
     # 5) GT
     ax = axes[4]
     ax.imshow(rgb)
-    draw_head_pose_arrow(ax, rgb,
-                         yaw_deg=gt[0],
-                         pitch_deg=gt[1],
-                         roll_deg=gt[2],
-                         color="lime")
+    draw_head_pose_axes(
+        ax, rgb,
+        yaw_deg=float(gt[0]),
+        pitch_deg=float(gt[1]),
+        roll_deg=float(gt[2]),
+    )
     ax.axis("off")
     ax.set_title("GT Pose", fontsize=20)
+
 
 
     pdf_path = os.path.join(out_dir, f"sample_{rank+1:02d}.pdf")
