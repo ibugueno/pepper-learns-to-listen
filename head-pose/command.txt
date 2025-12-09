@@ -35,7 +35,7 @@ python 2_train_biwi_vit.py \
   --augment \
   --model vit_base_patch16_224 \
   --pretrained \
-  --epochs 50 \
+  --epochs 100 \
   --out-dir /app/output/biwi-kinect-head/runs_vit_rgbd
 
   # for evaluate

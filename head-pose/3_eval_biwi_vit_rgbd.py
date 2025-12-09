@@ -352,25 +352,64 @@ class ViTHeadPoseModel(nn.Module):
 # -----------------------------
 # Visualization utilities
 # -----------------------------
-def draw_head_pose_arrow(ax, img, yaw_deg, pitch_deg, color="lime", label=""):
+def draw_head_pose_arrow(ax, img, yaw_deg, pitch_deg, roll_deg=0.0,
+                         color="lime", label=""):
     """
-    Draw a simple 2D arrow on the image to represent head pose direction.
-    Qualitative only.
+    Dibuja una flecha 2D que representa la dirección de la cabeza.
+
+    Convención asumida (típica en BIWI):
+      - yaw  > 0  → cabeza gira hacia su izquierda (nuestra derecha)
+      - pitch> 0  → cabeza mira hacia abajo
+      - roll > 0  → inclinación de la cabeza (oreja izq. hacia arriba)
+
+    Aproximamos el vector "nariz" como (0,0,1) y aplicamos rotaciones
+    RX(pitch) → RY(yaw) → RZ(roll) en grados.
     """
     h, w = img.shape[:2]
-    cx, cy = w // 2, h // 2
 
-    yaw = np.deg2rad(yaw_deg)
+    # Punto de origen: algo parecido a la nariz (un poco por debajo del centro)
+    cx = w * 0.5
+    cy = h * 0.55
+
+    # Pasar a radianes
+    yaw   = np.deg2rad(yaw_deg)
     pitch = np.deg2rad(pitch_deg)
+    roll  = np.deg2rad(roll_deg)
 
-    # Ajuste simple: izquierda/derecha con yaw, arriba/abajo con pitch
-    dx = np.sin(yaw) * np.cos(pitch)
-    dy = -np.sin(pitch)
+    # Matrices de rotación (convención cámara: x derecha, y abajo, z hacia dentro)
+    Rx = np.array([
+        [1,            0,             0],
+        [0,  np.cos(pitch), -np.sin(pitch)],
+        [0,  np.sin(pitch),  np.cos(pitch)],
+    ])
 
-    # Flecha más larga
-    length = min(h, w) * 1
-    x2 = cx + dx * length
-    y2 = cy + dy * length
+    Ry = np.array([
+        [ np.cos(yaw), 0, np.sin(yaw)],
+        [0,            1,          0],
+        [-np.sin(yaw), 0, np.cos(yaw)],
+    ])
+
+    Rz = np.array([
+        [np.cos(roll), -np.sin(roll), 0],
+        [np.sin(roll),  np.cos(roll), 0],
+        [0,             0,            1],
+    ])
+
+    # Orden: primero pitch, luego yaw, luego roll
+    R = Rz @ Ry @ Rx
+
+    # Vector "nariz" inicial apuntando hacia delante
+    v = np.array([0.0, 0.0, 1.0])
+    v_rot = R @ v
+
+    # Proyección al plano de imagen: x→derecha, y→abajo
+    dx_3d = v_rot[0]
+    dy_3d = -v_rot[1]   # signo menos: si v_rot[1]>0 (abajo), flecha baja
+
+    # Escala de la flecha
+    length = 0.4 * min(w, h)
+    x2 = cx + dx_3d * length
+    y2 = cy + dy_3d * length
 
     ax.arrow(
         cx, cy,
@@ -382,6 +421,7 @@ def draw_head_pose_arrow(ax, img, yaw_deg, pitch_deg, color="lime", label=""):
         linewidth=3,
         alpha=0.95,
     )
+
     if label:
         ax.text(
             cx, cy,
@@ -453,19 +493,28 @@ def save_sample_pdf(sample: Dict, out_dir: str, rank: int):
     ax.axis("off")
     ax.set_title("Mask", fontsize=20)
 
-    # 4) RGB con pose predicha (flecha roja)
+    # 4) Pred
     ax = axes[3]
     ax.imshow(rgb)
-    draw_head_pose_arrow(ax, rgb, pred[0], pred[1], color="red")
+    draw_head_pose_arrow(ax, rgb,
+                         yaw_deg=pred[0],
+                         pitch_deg=pred[1],
+                         roll_deg=pred[2],
+                         color="red")
     ax.axis("off")
     ax.set_title("Pred Pose", fontsize=20)
 
-    # 5) RGB con pose GT (flecha verde)
+    # 5) GT
     ax = axes[4]
     ax.imshow(rgb)
-    draw_head_pose_arrow(ax, rgb, gt[0], gt[1], color="lime")
+    draw_head_pose_arrow(ax, rgb,
+                         yaw_deg=gt[0],
+                         pitch_deg=gt[1],
+                         roll_deg=gt[2],
+                         color="lime")
     ax.axis("off")
     ax.set_title("GT Pose", fontsize=20)
+
 
     pdf_path = os.path.join(out_dir, f"sample_{rank+1:02d}.pdf")
     plt.tight_layout()
